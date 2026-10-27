@@ -169,6 +169,7 @@
 
   <details>
     <summary>Technical log (for fixing problems)</summary>
+    <div class="row"><button id="btnFitshow">Search FitShow type</button></div>
     <div class="row"><button id="btnName">Search by name (FS-)</button></div>
     <div class="row"><button id="btnAll">Show all devices</button></div>
     <div id="log"></div>
@@ -630,12 +631,14 @@ ${tp}
       device = await navigator.bluetooth.requestDevice(
         how === 'all' ? { acceptAllDevices: true, optionalServices }
         : how === 'name' ? { filters: [{ namePrefix: 'FS-' }], optionalServices }
-        : { filters: [{ services: [FTMS] }, { services: [FITSHOW] }], optionalServices });
+        : how === 'fitshow' ? { filters: [{ services: [FITSHOW] }], optionalServices: [FTMS, 0x180a] }
+        // Same shape as the heart-rate search, which Bluefy shows: one filter, one service.
+        : { filters: [{ services: [FTMS] }], optionalServices: [FITSHOW, 0x180a] });
     } catch (e) {
       log('pick failed: ' + e.name + ': ' + e.message);
-      setStatus(e.name === 'NotFoundError' && /cancel/i.test(e.message)
-        ? 'No treadmill picked.'
-        : `Bluetooth problem: ${e.name}: ${e.message}`, 'warn');
+      const cancelled = e.name === 'NotFoundError' && /cancel/i.test(e.message);
+      setStatus(cancelled ? 'No treadmill picked.' : `Bluetooth problem: ${e.name}: ${e.message}`, 'warn');
+      if (!cancelled) alert(`Bluetooth problem (search: ${how})\n\n${e.name}: ${e.message}`);
       return;
     }
     wantConnected = true;
@@ -708,6 +711,7 @@ ${tp}
   $('btnConnect').onclick = () => (device ? openGatt() : connect());
   $('btnAll').onclick = () => { device = null; connect('all'); };
   $('btnName').onclick = () => { device = null; connect('name'); };
+  $('btnFitshow').onclick = () => { device = null; connect('fitshow'); };
 
   // ---------- Bluetooth: heart rate (Garmin "Broadcast Heart Rate") ----------
   let hrDevice = null;
