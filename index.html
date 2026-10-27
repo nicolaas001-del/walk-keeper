@@ -18,9 +18,17 @@
     padding: max(16px, env(safe-area-inset-top)) 16px max(24px, env(safe-area-inset-bottom));
   }
   .wrap { max-width: 520px; margin: 0 auto; }
-  h1 { font-size: 20px; margin: 0 0 4px; }
-  #status { color: var(--muted); font-size: 14px; min-height: 20px; margin-bottom: 14px; }
+  h1 { font-size: 20px; margin: 0 0 10px; }
+  #status { color: var(--muted); font-size: 14px; min-height: 20px; margin: 10px 0 14px; }
   #status.ok { color: var(--accent); } #status.warn { color: var(--warn); } #status.bad { color: var(--bad); }
+  .profilebar { display: flex; gap: 8px; align-items: center; }
+  select, input {
+    font: inherit; color: var(--text); background: var(--card); border: 1px solid var(--line);
+    border-radius: 10px; padding: 10px 12px; width: 100%;
+  }
+  .profilebar select { flex: 1; font-weight: 600; }
+  .profilebar button { flex: 0 0 auto; padding: 10px 14px; font-size: 15px; }
+  #summary { color: var(--muted); font-size: 13px; margin-top: 6px; }
   .grid { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; }
   .tile { background: var(--card); border-radius: 14px; padding: 14px; }
   .tile.big { grid-column: span 2; text-align: center; padding: 20px 14px; }
@@ -35,21 +43,35 @@
   }
   button.primary { background: var(--accent); color: #06231a; }
   button.danger { background: #3a1f24; color: #ffb3b3; }
+  button.small { flex: 0 0 auto; padding: 8px 12px; font-size: 14px; border-radius: 10px; }
   button:disabled { opacity: .45; }
   #controls { display: none; }
   h2 { font-size: 15px; color: var(--muted); margin: 26px 0 8px; font-weight: 600; }
   .hist { background: var(--card); border-radius: 12px; padding: 10px 14px; margin-bottom: 8px;
-          display: flex; justify-content: space-between; font-variant-numeric: tabular-nums; }
-  .hist small { color: var(--muted); }
+          display: flex; justify-content: space-between; align-items: center; gap: 10px;
+          font-variant-numeric: tabular-nums; }
+  .hist small { color: var(--muted); display: block; }
   details { margin-top: 26px; color: var(--muted); font-size: 13px; }
   #log { white-space: pre-wrap; font: 11px/1.35 ui-monospace, Menlo, monospace; max-height: 240px;
          overflow: auto; background: #0a1016; padding: 8px; border-radius: 8px; margin-top: 8px; }
   .note { color: var(--muted); font-size: 13px; margin-top: 10px; }
+  #sheet { position: fixed; inset: 0; background: rgba(0,0,0,.6); display: none; align-items: flex-end; justify-content: center; }
+  #sheet.open { display: flex; }
+  #sheet .panel { background: var(--bg); width: 100%; max-width: 520px; border-radius: 18px 18px 0 0;
+                  padding: 20px 16px max(20px, env(safe-area-inset-bottom)); }
+  #sheet label { display: block; color: var(--muted); font-size: 13px; margin: 12px 0 4px; }
+  .two { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; }
 </style>
 </head>
 <body>
 <div class="wrap">
   <h1>Walk Keeper</h1>
+  <div class="profilebar">
+    <select id="profileSel" aria-label="Who is walking"></select>
+    <button id="btnEdit">Edit</button>
+    <button id="btnAdd">+ Person</button>
+  </div>
+  <div id="summary"></div>
   <div id="status">Not connected.</div>
 
   <div class="grid">
@@ -57,12 +79,17 @@
     <div class="tile big"><div class="label">Distance</div><div class="val"><span id="dist">0.00</span><span class="unit">km</span></div></div>
     <div class="tile"><div class="label">Speed</div><div class="val"><span id="speed">0.0</span><span class="unit">km/h</span></div></div>
     <div class="tile"><div class="label">Pace</div><div class="val"><span id="pace">–</span><span class="unit">/km</span></div></div>
+    <div class="tile"><div class="label">Calories</div><div class="val"><span id="kcal">0</span><span class="unit">kcal</span></div></div>
+    <div class="tile"><div class="label">Heart rate</div><div class="val"><span id="hr">–</span><span class="unit">bpm</span></div></div>
     <div class="tile"><div class="label">Steps</div><div class="val" id="steps">–</div></div>
-    <div class="tile"><div class="label">Calories</div><div class="val"><span id="kcal">–</span><span class="unit">kcal</span></div></div>
+    <div class="tile"><div class="label">Incline</div><div class="val"><span id="incline">0</span><span class="unit">%</span></div></div>
   </div>
 
   <div class="row">
     <button class="primary" id="btnConnect">Connect treadmill</button>
+  </div>
+  <div class="row">
+    <button id="btnHr">Connect Garmin heart rate</button>
   </div>
   <div class="row" id="controls">
     <button id="btnSlower">− Slower</button>
@@ -74,8 +101,15 @@
   </div>
   <div class="note">Stop and start the treadmill as much as you like. The totals keep adding up until you push "Finish walk".</div>
 
-  <h2>Past walks</h2>
-  <div id="history"><div class="note">No walks saved yet.</div></div>
+  <h2 id="histTitle">Past walks</h2>
+  <div id="history"></div>
+  <div class="note">Tap "Garmin" on a walk to save it as a file. Then add that file to Garmin Connect (see the help below).</div>
+
+  <details>
+    <summary>Help: Garmin</summary>
+    <p><b>Live heart rate:</b> on the watch, start "Broadcast Heart Rate" (on most watches: hold the Menu button, or open the Controls menu). Then push "Connect Garmin heart rate" here. With heart rate, the calories are more correct.</p>
+    <p><b>Add a walk to Garmin Connect:</b> push "Garmin" on the walk and save the file to Files. On a computer, go to connect.garmin.com, click the cloud icon (top right) → "Import Data", and pick the file. In Garmin Connect, change the activity type to "Treadmill walking" if you want.</p>
+  </details>
 
   <details>
     <summary>Technical log (for fixing problems)</summary>
@@ -83,30 +117,70 @@
   </details>
 </div>
 
+<div id="sheet">
+  <div class="panel">
+    <h1 id="sheetTitle">Person</h1>
+    <label for="fName">Name</label><input id="fName" autocomplete="off">
+    <div class="two">
+      <div><label for="fKg">Weight (kg)</label><input id="fKg" type="number" inputmode="decimal" min="20" max="300"></div>
+      <div><label for="fAge">Age</label><input id="fAge" type="number" inputmode="numeric" min="5" max="110"></div>
+    </div>
+    <label for="fSex">Sex (for heart-rate calories)</label>
+    <select id="fSex"><option value="m">Male</option><option value="f">Female</option></select>
+    <div class="row">
+      <button class="primary" id="fSave">Save</button>
+      <button id="fCancel">Cancel</button>
+    </div>
+    <div class="row"><button class="danger" id="fDelete">Delete this person</button></div>
+  </div>
+</div>
+
 <script>
 (() => {
   'use strict';
   const FTMS = 0x1826, FTMS_TREADMILL = 0x2acd, FTMS_CONTROL = 0x2ad9;
   const FITSHOW = 0xfff0, FITSHOW_NOTIFY = 0xfff1, FITSHOW_WRITE = 0xfff2;
-  const KEY = 'walkkeeper.v1';
+  const HRS = 0x180d, HR_MEASURE = 0x2a37;
+  const KEY = 'walkkeeper.v2', OLD_KEY = 'walkkeeper.v1';
+  const KEEP_SAMPLES = 30;                      // walks that keep their detail for Garmin export
   const $ = id => document.getElementById(id);
+  const esc = s => String(s).replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
 
   // ---------- saved state ----------
-  const blank = () => ({
-    time: 0,                                   // moving seconds, counted by the app
-    counters: { dist: blankCounter(), steps: blankCounter(), kcal: blankCounter() },
-    startedAt: null,
-  });
   function blankCounter() { return { bank: 0, seg: 0 }; }
-  let state = { walk: blank(), history: [] };
-  try {
-    const s = JSON.parse(localStorage.getItem(KEY));
-    if (s && s.walk) state = s;
-  } catch (e) {}
+  const blankWalk = () => ({
+    time: 0,                                    // moving seconds, counted by the app
+    kcal: 0,                                    // worked out by the app from the person's weight
+    counters: { dist: blankCounter(), steps: blankCounter() },
+    startedAt: null,
+    samples: [],                                // {t, d, hr} every 5 s, for the Garmin file
+  });
+  const newProfile = name => ({
+    id: Date.now().toString(36) + Math.random().toString(36).slice(2, 6),
+    name, kg: 80, age: 40, sex: 'm', history: [],
+  });
+
+  let state = null;
+  try { state = JSON.parse(localStorage.getItem(KEY)); } catch (e) {}
+  if (!state || !state.profiles || !state.profiles.length) {
+    const me = newProfile('Me');
+    state = { profiles: [me], active: me.id, walk: blankWalk() };
+    try {                                       // bring over walks from the first version
+      const old = JSON.parse(localStorage.getItem(OLD_KEY));
+      if (old && old.history) me.history = old.history;
+      if (old && old.walk) {
+        state.walk.time = old.walk.time || 0;
+        state.walk.startedAt = old.walk.startedAt || null;
+        state.walk.counters.dist = old.walk.counters.dist;
+        state.walk.counters.steps = old.walk.counters.steps;
+      }
+    } catch (e) {}
+  }
+  const profile = () => state.profiles.find(p => p.id === state.active) || state.profiles[0];
   function save() { try { localStorage.setItem(KEY, JSON.stringify(state)); } catch (e) {} }
 
-  // A treadmill counter (distance, steps, calories) goes back to 0 when the
-  // belt stops. When it drops, bank what we had and start a new segment.
+  // A treadmill counter (distance, steps) goes back to 0 when the belt stops.
+  // When it drops, bank what we had and start a new segment.
   function feedCounter(c, v) {
     if (v == null || !isFinite(v)) return;
     if (v + 0.5 < c.seg) { c.bank += c.seg; log(`counter reset seen, banked ${c.seg}`); }
@@ -115,30 +189,52 @@
   const total = c => c.bank + c.seg;
 
   // ---------- live data ----------
-  let live = { speed: 0, at: 0, hasDist: false, hasSteps: false, hasKcal: false };
+  let live = { speed: 0, incline: 0, at: 0, hasDist: false, hasSteps: false, hr: 0, hrAt: 0 };
   let lastTick = Date.now();
 
   function onReading(r) {
     const w = state.walk;
     if (r.speed != null) live.speed = r.speed;
+    if (r.incline != null) live.incline = r.incline;
     live.at = Date.now();
     if (r.dist != null) { live.hasDist = true; feedCounter(w.counters.dist, r.dist); }
     if (r.steps != null) { live.hasSteps = true; feedCounter(w.counters.steps, r.steps); }
-    if (r.kcal != null) { live.hasKcal = true; feedCounter(w.counters.kcal, r.kcal); }
     if (!w.startedAt && live.speed > 0.3) w.startedAt = Date.now();
     save(); render();
   }
+  function onHr(bpm) { live.hr = bpm; live.hrAt = Date.now(); render(); }
+  const hrFresh = () => live.hr > 40 && Date.now() - live.hrAt < 10000;
 
-  // One tick per second: count walking time, and work out distance from
-  // speed if the treadmill does not send a distance.
+  // Calories per minute for the active person.
+  // With heart rate: Keytel et al. (2005). Without: ACSM walking / running equations.
+  function kcalPerMin() {
+    const p = profile(), v = live.speed;
+    if (v <= 0.3) return 0;
+    if (hrFresh()) {
+      const k = p.sex === 'f'
+        ? -20.4022 + 0.4472 * live.hr - 0.1263 * p.kg + 0.074 * p.age
+        : -55.0969 + 0.6309 * live.hr + 0.1988 * p.kg + 0.2017 * p.age;
+      return Math.max(0, k / 4.184);
+    }
+    const m = v * 1000 / 60, g = (live.incline || 0) / 100;
+    const vo2 = v <= 6.4 ? 0.1 * m + 1.8 * m * g + 3.5 : 0.2 * m + 0.9 * m * g + 3.5;
+    return vo2 * p.kg / 1000 * 5;
+  }
+
+  // One tick per second: count walking time and calories, and work out
+  // distance from speed if the treadmill does not send a distance.
   setInterval(() => {
-    const now = Date.now(), dt = Math.min((now - lastTick) / 1000, 3);
+    const now = Date.now(), dt = Math.min((now - lastTick) / 1000, 3), w = state.walk;
     lastTick = now;
     const fresh = now - live.at < 5000;
     if (!fresh) live.speed = 0;
     if (fresh && live.speed > 0.3) {
-      state.walk.time += dt;
-      if (!live.hasDist) state.walk.counters.dist.bank += live.speed * dt / 3.6;
+      w.time += dt;
+      w.kcal += kcalPerMin() * dt / 60;
+      if (!live.hasDist) w.counters.dist.bank += live.speed * dt / 3.6;
+      const last = w.samples[w.samples.length - 1];
+      if (!last || now - last.t >= 5000)
+        w.samples.push({ t: now, d: Math.round(total(w.counters.dist)), hr: hrFresh() ? live.hr : 0 });
       save();
     }
     render();
@@ -156,44 +252,142 @@
     $('dist').textContent = km.toFixed(2);
     $('speed').textContent = live.speed.toFixed(1);
     $('pace').textContent = live.speed > 0.3 ? fmtTime(3600 / live.speed) : '–';
+    $('kcal').textContent = Math.round(w.kcal);
+    $('hr').textContent = hrFresh() ? live.hr : '–';
+    $('incline').textContent = Math.round(live.incline * 10) / 10;
     $('steps').textContent = live.hasSteps || total(w.counters.steps) ? Math.round(total(w.counters.steps)) : '–';
-    $('kcal').textContent = live.hasKcal || total(w.counters.kcal) ? Math.round(total(w.counters.kcal)) : '–';
     $('btnStartStop').textContent = live.speed > 0.3 ? 'Stop belt' : 'Start belt';
   }
+  function renderProfiles() {
+    $('profileSel').innerHTML = state.profiles.map(p =>
+      `<option value="${p.id}"${p.id === state.active ? ' selected' : ''}>${esc(p.name)} · ${p.kg} kg</option>`).join('');
+    const h = profile().history;
+    const weekAgo = Date.now() - 7 * 864e5;
+    const sum = (list, k) => list.reduce((a, x) => a + (x[k] || 0), 0);
+    const week = h.filter(x => x.date >= weekAgo);
+    $('summary').textContent = h.length
+      ? `Last 7 days: ${(sum(week, 'dist') / 1000).toFixed(1)} km · ${Math.round(sum(week, 'kcal'))} kcal   |   All time: ${(sum(h, 'dist') / 1000).toFixed(1)} km in ${h.length} walk${h.length > 1 ? 's' : ''}`
+      : 'No walks saved yet for this person.';
+  }
   function renderHistory() {
-    const h = state.history;
-    $('history').innerHTML = h.length ? h.slice().reverse().map(x => {
+    const p = profile(), h = p.history;
+    $('histTitle').textContent = `Past walks: ${p.name}`;
+    $('history').innerHTML = h.length ? h.map((x, i) => ({ x, i })).reverse().map(({ x, i }) => {
       const d = new Date(x.date);
-      return `<div class="hist"><span>${d.toLocaleDateString()} <small>${d.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}</small></span>
-        <span>${(x.dist / 1000).toFixed(2)} km · ${fmtTime(x.time)}</span></div>`;
+      return `<div class="hist"><span>${d.toLocaleDateString()} ${d.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}
+        <small>${(x.dist / 1000).toFixed(2)} km · ${fmtTime(x.time)} · ${Math.round(x.kcal || 0)} kcal</small></span>
+        <button class="small" data-garmin="${i}">Garmin</button></div>`;
     }).join('') : '<div class="note">No walks saved yet.</div>';
   }
+  function renderAll() { render(); renderProfiles(); renderHistory(); }
   function setStatus(t, cls = '') { const s = $('status'); s.textContent = t; s.className = cls; }
   function log(t) {
     const el = $('log');
     el.textContent = (new Date().toLocaleTimeString() + ' ' + t + '\n' + el.textContent).slice(0, 8000);
   }
   const hex = dv => [...new Uint8Array(dv.buffer, dv.byteOffset, dv.byteLength)].map(b => b.toString(16).padStart(2, '0')).join(' ');
+  const walkHasData = () => state.walk.time >= 5 || total(state.walk.counters.dist) >= 5;
 
-  $('btnFinish').onclick = () => {
-    const w = state.walk;
-    if (w.time < 5 && total(w.counters.dist) < 5) { alert('Nothing to save yet.'); return; }
-    if (!confirm(`Save this walk?\n${(total(w.counters.dist) / 1000).toFixed(2)} km in ${fmtTime(w.time)}\n\nThe counters then go back to zero.`)) return;
-    state.history.push({ date: w.startedAt || Date.now(), time: Math.round(w.time), dist: Math.round(total(w.counters.dist)),
-                         steps: Math.round(total(w.counters.steps)), kcal: Math.round(total(w.counters.kcal)) });
-    state.walk = blank();
-    // The treadmill's own counter may still show the last numbers; treat them as the start point.
-    for (const k in state.walk.counters) state.walk.counters[k].bank = -lastRaw[k];
-    save(); render(); renderHistory();
+  // ---------- people ----------
+  let editing = null;
+  function openSheet(p, isNew) {
+    editing = { p, isNew };
+    $('sheetTitle').textContent = isNew ? 'New person' : 'Edit person';
+    $('fName').value = p.name; $('fKg').value = p.kg; $('fAge').value = p.age; $('fSex').value = p.sex;
+    $('fDelete').style.display = !isNew && state.profiles.length > 1 ? '' : 'none';
+    $('sheet').classList.add('open');
+  }
+  const closeSheet = () => { $('sheet').classList.remove('open'); editing = null; };
+  $('btnEdit').onclick = () => openSheet(profile(), false);
+  $('btnAdd').onclick = () => {
+    if (walkHasData()) { alert('Finish and save the current walk first.'); return; }
+    openSheet(newProfile(''), true);
+  };
+  $('fCancel').onclick = closeSheet;
+  $('fSave').onclick = () => {
+    const { p, isNew } = editing;
+    const name = $('fName').value.trim();
+    const kg = parseFloat($('fKg').value), age = parseInt($('fAge').value, 10);
+    if (!name) { alert('Type a name.'); return; }
+    if (!(kg >= 20 && kg <= 300)) { alert('Type a weight between 20 and 300 kg.'); return; }
+    if (!(age >= 5 && age <= 110)) { alert('Type an age between 5 and 110.'); return; }
+    Object.assign(p, { name, kg: Math.round(kg * 10) / 10, age, sex: $('fSex').value });
+    if (isNew) { state.profiles.push(p); state.active = p.id; }
+    save(); closeSheet(); renderAll();
+  };
+  $('fDelete').onclick = () => {
+    const p = editing.p;
+    if (!confirm(`Delete ${p.name} and all ${p.history.length} saved walks?`)) return;
+    state.profiles = state.profiles.filter(x => x !== p);
+    if (state.active === p.id) state.active = state.profiles[0].id;
+    save(); closeSheet(); renderAll();
+  };
+  $('profileSel').onchange = e => {
+    if (walkHasData()) {
+      alert('Finish and save the current walk first. Then change the person.');
+      e.target.value = state.active; return;
+    }
+    state.active = e.target.value; save(); renderAll();
   };
 
-  // ---------- Bluetooth ----------
+  $('btnFinish').onclick = () => {
+    const w = state.walk, p = profile();
+    if (!walkHasData()) { alert('Nothing to save yet.'); return; }
+    if (!confirm(`Save this walk for ${p.name}?\n${(total(w.counters.dist) / 1000).toFixed(2)} km in ${fmtTime(w.time)}, ${Math.round(w.kcal)} kcal\n\nThe counters then go back to zero.`)) return;
+    p.history.push({ date: w.startedAt || Date.now(), time: Math.round(w.time), dist: Math.round(total(w.counters.dist)),
+                     steps: Math.round(total(w.counters.steps)), kcal: Math.round(w.kcal), samples: w.samples });
+    p.history.slice(0, -KEEP_SAMPLES).forEach(x => delete x.samples);
+    state.walk = blankWalk();
+    // The treadmill's own counter may still show the last numbers; treat them as the start point.
+    for (const k in state.walk.counters) state.walk.counters[k].bank = -lastRaw[k];
+    save(); renderAll();
+  };
+
+  // ---------- Garmin file (TCX) ----------
+  function toTcx(x, p) {
+    const iso = t => new Date(t).toISOString();
+    const start = x.date;
+    let pts = x.samples && x.samples.length ? x.samples
+      : [{ t: start, d: 0, hr: 0 }, { t: start + x.time * 1000, d: x.dist, hr: 0 }];
+    const tp = pts.map(s => `<Trackpoint><Time>${iso(s.t)}</Time><DistanceMeters>${s.d}</DistanceMeters>` +
+      (s.hr ? `<HeartRateBpm><Value>${s.hr}</Value></HeartRateBpm>` : '') + `</Trackpoint>`).join('\n');
+    return `<?xml version="1.0" encoding="UTF-8"?>
+<TrainingCenterDatabase xmlns="http://www.garmin.com/xmlschemas/TrainingCenterDatabase/v2">
+<Activities><Activity Sport="Other"><Id>${iso(start)}</Id>
+<Lap StartTime="${iso(start)}"><TotalTimeSeconds>${x.time}</TotalTimeSeconds><DistanceMeters>${x.dist}</DistanceMeters>
+<Calories>${Math.min(65535, Math.round(x.kcal || 0))}</Calories><Intensity>Active</Intensity><TriggerMethod>Manual</TriggerMethod>
+<Track>
+${tp}
+</Track></Lap>
+<Notes>Treadmill walk (${esc(p.name)}) - Walk Keeper</Notes>
+</Activity></Activities></TrainingCenterDatabase>
+`;
+  }
+  async function shareFile(name, text) {
+    const file = new File([text], name, { type: 'application/xml' });
+    try {
+      if (navigator.canShare && navigator.canShare({ files: [file] })) { await navigator.share({ files: [file], title: name }); return; }
+    } catch (e) { if (e.name === 'AbortError') return; log('share failed: ' + e.message); }
+    const a = document.createElement('a');
+    a.href = URL.createObjectURL(file); a.download = name;
+    document.body.appendChild(a); a.click(); a.remove();
+    setTimeout(() => URL.revokeObjectURL(a.href), 10000);
+  }
+  $('history').onclick = e => {
+    const i = e.target.dataset && e.target.dataset.garmin;
+    if (i == null) return;
+    const p = profile(), x = p.history[+i], d = new Date(x.date);
+    const name = `walk-${p.name.replace(/[^a-z0-9]+/gi, '-')}-${d.toISOString().slice(0, 16).replace(/[:T]/g, '-')}.tcx`;
+    shareFile(name, toTcx(x, p));
+  };
+
+  // ---------- Bluetooth: treadmill ----------
   let device = null, mode = null, ctrlChar = null, writeChar = null, pollTimer = null, wantConnected = false;
-  let lastRaw = { dist: 0, steps: 0, kcal: 0 };
+  let lastRaw = { dist: 0, steps: 0 };
   let ftmsMerged = {};
 
   function emit(r) {
-    for (const k of ['dist', 'steps', 'kcal']) if (r[k] != null) lastRaw[k] = r[k];
+    for (const k of ['dist', 'steps']) if (r[k] != null) lastRaw[k] = r[k];
     onReading(r);
   }
 
@@ -205,12 +399,12 @@
     if (!(f & 0x0001) && has(2)) { r.speed = dv.getUint16(i, true) / 100; i += 2; }
     if (f & 0x0002) i += 2;                                  // average speed
     if (f & 0x0004 && has(3)) { r.dist = dv.getUint8(i) | dv.getUint8(i + 1) << 8 | dv.getUint8(i + 2) << 16; i += 3; }
-    if (f & 0x0008) i += 4;                                  // incline + ramp
+    if (f & 0x0008 && has(4)) { r.incline = dv.getInt16(i, true) / 10; i += 4; }  // incline + ramp
     if (f & 0x0010) i += 4;                                  // elevation gain
     if (f & 0x0020) i += 1;                                  // pace
     if (f & 0x0040) i += 1;                                  // average pace
-    if (f & 0x0080 && has(5)) { const e = dv.getUint16(i, true); if (e !== 0xffff) r.kcal = e; i += 5; }
-    if (f & 0x0100) i += 1;                                  // heart rate
+    if (f & 0x0080) i += 5;                                  // energy (we work this out ourselves)
+    if (f & 0x0100 && has(1)) { const hr = dv.getUint8(i); if (hr) onHr(hr); i += 1; }
     if (f & 0x0200) i += 1;                                  // MET
     if (f & 0x0400 && has(2)) { r.time = dv.getUint16(i, true); i += 2; }
     return r;
@@ -228,9 +422,9 @@
     if (st !== 3 || b.length < 13) return { speed: 0 };       // 3 = running
     return {
       speed: b[3] / 10,
+      incline: (b[4] << 24 >> 24),
       time: b[5] | b[6] << 8,
       dist: b[7] | b[8] << 8,                                 // metres
-      kcal: (b[9] | b[10] << 8) / 10,
       steps: b[11] | b[12] << 8,
     };
   }
@@ -290,7 +484,7 @@
       }
 
       $('controls').style.display = ctrlChar ? 'flex' : 'none';
-      $('btnConnect').textContent = 'Connected';
+      $('btnConnect').textContent = 'Treadmill connected';
       $('btnConnect').disabled = true;
       setStatus(`Connected to ${device.name || 'treadmill'} (${mode}).`, 'ok');
       log('connected, mode ' + mode);
@@ -304,7 +498,7 @@
 
   function onDisconnect() {
     clearInterval(pollTimer); live.speed = 0;
-    $('btnConnect').disabled = false; $('btnConnect').textContent = 'Reconnect';
+    $('btnConnect').disabled = false; $('btnConnect').textContent = 'Reconnect treadmill';
     setStatus('Connection lost. Trying again… Your walk is safe.', 'warn');
     log('disconnected');
     if (wantConnected) setTimeout(retry, 2000);
@@ -312,6 +506,35 @@
   function retry() { if (device && !device.gatt.connected) openGatt(); }
 
   $('btnConnect').onclick = () => (device ? openGatt() : connect());
+
+  // ---------- Bluetooth: heart rate (Garmin "Broadcast Heart Rate") ----------
+  let hrDevice = null;
+  async function connectHr() {
+    if (!navigator.bluetooth) { setStatus('This browser has no Bluetooth. On iPhone, use the "Bluefy" app.', 'bad'); return; }
+    try {
+      if (!hrDevice) {
+        hrDevice = await navigator.bluetooth.requestDevice({ filters: [{ services: [HRS] }] });
+        hrDevice.addEventListener('gattserverdisconnected', () => {
+          $('btnHr').textContent = 'Reconnect heart rate'; $('btnHr').disabled = false;
+          log('heart rate disconnected');
+          setTimeout(() => hrDevice && !hrDevice.gatt.connected && connectHr(), 3000);
+        });
+      }
+      const server = await hrDevice.gatt.connect();
+      const ch = await (await server.getPrimaryService(HRS)).getCharacteristic(HR_MEASURE);
+      ch.addEventListener('characteristicvaluechanged', e => {
+        const dv = e.target.value;
+        onHr(dv.getUint8(0) & 1 ? dv.getUint16(1, true) : dv.getUint8(1));
+      });
+      await ch.startNotifications();
+      $('btnHr').textContent = `Heart rate: ${hrDevice.name || 'connected'}`; $('btnHr').disabled = true;
+      log('heart rate connected');
+    } catch (e) {
+      log('heart rate failed: ' + e.message);
+      if (e.name !== 'NotFoundError') setStatus('Heart rate: ' + e.message, 'warn');
+    }
+  }
+  $('btnHr').onclick = connectHr;
 
   // ---------- belt control (only when the treadmill allows FTMS control) ----------
   async function ctrl(bytes) {
@@ -336,18 +559,19 @@
 
   // ---------- demo mode for testing: add ?demo to the address ----------
   if (location.search.includes('demo')) {
-    setStatus('Demo mode (fake treadmill).', 'ok');
+    setStatus('Demo mode (fake treadmill and heart rate).', 'ok');
     let t = 0, d = 0;
     setInterval(() => {
       t++;
       const running = t % 40 < 25;                 // walk 25 s, stop 15 s, repeat
       if (!running && t % 40 === 25) d = 0;        // treadmill forgets its distance
       if (running) d += 50;
-      emit({ speed: running ? 4.5 : 0, dist: d, steps: Math.round(d / 0.7) });
+      emit({ speed: running ? 4.5 : 0, dist: d, steps: Math.round(d / 0.7), incline: 2 });
+      onHr(running ? 115 : 95);
     }, 1000);
   }
 
-  render(); renderHistory();
+  save(); renderAll();
 })();
 </script>
 </body>
