@@ -61,6 +61,27 @@
                   padding: 20px 16px max(20px, env(safe-area-inset-bottom)); }
   #sheet label { display: block; color: var(--muted); font-size: 13px; margin: 12px 0 4px; }
   .two { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; }
+  .tabs { display: flex; gap: 6px; background: var(--card); border-radius: 12px; padding: 4px; margin-bottom: 12px; }
+  .tabs button { padding: 10px 6px; font-size: 15px; background: transparent; color: var(--muted); border-radius: 9px; }
+  .tabs button.on { background: var(--bg); color: var(--text); }
+  section { display: none; } section.on { display: block; }
+  .bar { height: 8px; background: var(--line); border-radius: 4px; overflow: hidden; margin-top: 8px; }
+  .bar > div { height: 100%; background: var(--accent); border-radius: 4px; }
+  .person { background: var(--card); border-radius: 14px; padding: 14px; margin-bottom: 10px; }
+  .person .top { display: flex; justify-content: space-between; align-items: baseline; gap: 8px; }
+  .person .name { font-size: 18px; font-weight: 700; }
+  .person .km { font-size: 22px; font-weight: 700; font-variant-numeric: tabular-nums; }
+  .person .meta { color: var(--muted); font-size: 13px; margin-top: 6px; }
+  .chart { display: flex; align-items: flex-end; gap: 6px; height: 120px; background: var(--card);
+           border-radius: 14px; padding: 12px 12px 0; }
+  .chart .col { flex: 1; display: flex; flex-direction: column; align-items: center; justify-content: flex-end; height: 100%; }
+  .chart .b { width: 100%; background: var(--accent); border-radius: 5px 5px 0 0; min-height: 2px; }
+  .chart .n { font-size: 10px; color: var(--muted); margin-bottom: 2px; }
+  .chart .d { font-size: 11px; color: var(--muted); padding: 4px 0 8px; }
+  .toggle { display: flex; justify-content: space-between; align-items: center; background: var(--card);
+            border-radius: 12px; padding: 12px 14px; margin-top: 12px; }
+  .toggle input { width: auto; transform: scale(1.4); }
+  #goalBox { margin-top: 10px; }
 </style>
 </head>
 <body>
@@ -71,8 +92,16 @@
     <button id="btnEdit">Edit</button>
     <button id="btnAdd">+ Person</button>
   </div>
-  <div id="summary"></div>
+  <div id="goalBox"></div>
   <div id="status">Not connected.</div>
+
+  <div class="tabs">
+    <button data-tab="Walk" class="on">Walk</button>
+    <button data-tab="Family">Family</button>
+    <button data-tab="Stats">My stats</button>
+  </div>
+
+  <section id="tabWalk" class="on">
 
   <div class="grid">
     <div class="tile big"><div class="label">Walking time</div><div class="val" id="time">0:00</div></div>
@@ -100,10 +129,31 @@
     <button class="danger" id="btnFinish">Finish walk &amp; save</button>
   </div>
   <div class="note">Stop and start the treadmill as much as you like. The totals keep adding up until you push "Finish walk".</div>
+  <label class="toggle"><span>Speak every kilometre</span><input type="checkbox" id="voice"></label>
+  </section>
 
-  <h2 id="histTitle">Past walks</h2>
-  <div id="history"></div>
-  <div class="note">Tap "Garmin" on a walk to save it as a file. Then add that file to Garmin Connect (see the help below).</div>
+  <section id="tabFamily">
+    <div id="board"></div>
+    <div class="note">Ranked by distance this week (Monday to Sunday). 🔥 = days in a row with a walk.</div>
+  </section>
+
+  <section id="tabStats">
+    <div id="summary"></div>
+    <h2>Last 7 days</h2>
+    <div class="chart" id="chart"></div>
+    <h2>Personal bests</h2>
+    <div class="grid" id="bests"></div>
+    <h2 id="histTitle">Past walks</h2>
+    <div id="history"></div>
+    <div class="note">Tap "Garmin" on a walk to save it as a file. Then add that file to Garmin Connect (see the help below).</div>
+    <h2>Backup</h2>
+    <div class="row">
+      <button id="btnBackup">Save backup</button>
+      <button id="btnRestore">Load backup</button>
+    </div>
+    <input type="file" id="fileRestore" accept=".json,application/json" hidden>
+    <div class="note">Your walks live only in this phone's browser. Save a backup now and then, for example to iCloud Drive.</div>
+  </section>
 
   <details>
     <summary>Help: Garmin</summary>
@@ -125,8 +175,11 @@
       <div><label for="fKg">Weight (kg)</label><input id="fKg" type="number" inputmode="decimal" min="20" max="300"></div>
       <div><label for="fAge">Age</label><input id="fAge" type="number" inputmode="numeric" min="5" max="110"></div>
     </div>
-    <label for="fSex">Sex (for heart-rate calories)</label>
-    <select id="fSex"><option value="m">Male</option><option value="f">Female</option></select>
+    <div class="two">
+      <div><label for="fSex">Sex (for calories)</label>
+        <select id="fSex"><option value="m">Male</option><option value="f">Female</option></select></div>
+      <div><label for="fGoal">Weekly goal (km)</label><input id="fGoal" type="number" inputmode="decimal" min="1" max="500"></div>
+    </div>
     <div class="row">
       <button class="primary" id="fSave">Save</button>
       <button id="fCancel">Cancel</button>
@@ -157,7 +210,7 @@
   });
   const newProfile = name => ({
     id: Date.now().toString(36) + Math.random().toString(36).slice(2, 6),
-    name, kg: 80, age: 40, sex: 'm', history: [],
+    name, kg: 80, age: 40, sex: 'm', goal: 10, history: [],
   });
 
   let state = null;
@@ -235,9 +288,12 @@
       const last = w.samples[w.samples.length - 1];
       if (!last || now - last.t >= 5000)
         w.samples.push({ t: now, d: Math.round(total(w.counters.dist)), hr: hrFresh() ? live.hr : 0 });
+      announce();
       save();
     }
-    render();
+    render(); renderProfiles();
+    if (tab === 'Family') renderFamily();
+    if (tab === 'Stats') renderStats();
   }, 1000);
 
   // ---------- screen ----------
@@ -258,17 +314,112 @@
     $('steps').textContent = live.hasSteps || total(w.counters.steps) ? Math.round(total(w.counters.steps)) : '–';
     $('btnStartStop').textContent = live.speed > 0.3 ? 'Stop belt' : 'Start belt';
   }
+  // ---------- stats helpers ----------
+  const sum = (list, k) => list.reduce((a, x) => a + (x[k] || 0), 0);
+  const dayKey = t => { const d = new Date(t); return `${d.getFullYear()}-${d.getMonth()}-${d.getDate()}`; };
+  function weekStart() {                       // Monday 00:00 of this week
+    const d = new Date(); d.setHours(0, 0, 0, 0);
+    d.setDate(d.getDate() - (d.getDay() + 6) % 7);
+    return d.getTime();
+  }
+  // Metres this week, including the walk that is going on now for the active person.
+  function weekMetres(p) {
+    let m = sum(p.history.filter(x => x.date >= weekStart()), 'dist');
+    if (p.id === state.active) m += total(state.walk.counters.dist);
+    return m;
+  }
+  function streak(p) {
+    const days = new Set(p.history.map(x => dayKey(x.date)));
+    if (p.id === state.active && walkHasData()) days.add(dayKey(Date.now()));
+    const d = new Date(); d.setHours(12, 0, 0, 0);
+    if (!days.has(dayKey(d))) d.setDate(d.getDate() - 1);   // today not walked yet: count from yesterday
+    let n = 0;
+    while (days.has(dayKey(d))) { n++; d.setDate(d.getDate() - 1); }
+    return n;
+  }
+  const goalOf = p => p.goal || 10;
+  const bar = frac => `<div class="bar"><div style="width:${Math.min(100, frac * 100).toFixed(1)}%"></div></div>`;
+
   function renderProfiles() {
     $('profileSel').innerHTML = state.profiles.map(p =>
       `<option value="${p.id}"${p.id === state.active ? ' selected' : ''}>${esc(p.name)} · ${p.kg} kg</option>`).join('');
-    const h = profile().history;
-    const weekAgo = Date.now() - 7 * 864e5;
-    const sum = (list, k) => list.reduce((a, x) => a + (x[k] || 0), 0);
-    const week = h.filter(x => x.date >= weekAgo);
+    const p = profile(), h = p.history, wk = weekMetres(p) / 1000, s = streak(p);
+    $('goalBox').innerHTML = `<div class="meta" style="display:flex;justify-content:space-between;color:var(--muted);font-size:13px">
+      <span>This week: <b style="color:var(--text)">${wk.toFixed(1)}</b> / ${goalOf(p)} km${wk >= goalOf(p) ? ' 🎉' : ''}</span>
+      <span>${s ? `🔥 ${s} day${s > 1 ? 's' : ''}` : ''}</span></div>${bar(wk / goalOf(p))}`;
     $('summary').textContent = h.length
-      ? `Last 7 days: ${(sum(week, 'dist') / 1000).toFixed(1)} km · ${Math.round(sum(week, 'kcal'))} kcal   |   All time: ${(sum(h, 'dist') / 1000).toFixed(1)} km in ${h.length} walk${h.length > 1 ? 's' : ''}`
+      ? `All time: ${(sum(h, 'dist') / 1000).toFixed(1)} km · ${Math.round(sum(h, 'kcal'))} kcal · ${fmtTime(sum(h, 'time'))} walking · ${h.length} walk${h.length > 1 ? 's' : ''}`
       : 'No walks saved yet for this person.';
   }
+
+  function renderFamily() {
+    const rows = state.profiles.map(p => ({ p, wk: weekMetres(p) / 1000, s: streak(p), all: sum(p.history, 'dist') / 1000 }))
+      .sort((a, b) => b.wk - a.wk);
+    $('board').innerHTML = rows.map((r, i) => `
+      <div class="person">
+        <div class="top"><span class="name">${i === 0 && r.wk > 0 ? '👑 ' : `${i + 1}. `}${esc(r.p.name)}</span>
+          <span class="km">${r.wk.toFixed(1)}<span class="unit">km</span></span></div>
+        ${bar(r.wk / goalOf(r.p))}
+        <div class="meta">Goal ${goalOf(r.p)} km${r.wk >= goalOf(r.p) ? ' ✅' : ''} · ${r.s ? `🔥 ${r.s}` : 'no streak'} · all time ${r.all.toFixed(1)} km</div>
+      </div>`).join('');
+  }
+
+  function renderStats() {
+    const p = profile(), h = p.history;
+    const names = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'];
+    const days = [];
+    for (let i = 6; i >= 0; i--) {
+      const d = new Date(); d.setHours(12, 0, 0, 0); d.setDate(d.getDate() - i);
+      let m = sum(h.filter(x => dayKey(x.date) === dayKey(d)), 'dist');
+      if (i === 0) m += total(state.walk.counters.dist);
+      days.push({ label: i === 0 ? 'Today' : names[d.getDay()], km: m / 1000 });
+    }
+    const max = Math.max(1, ...days.map(d => d.km));
+    $('chart').innerHTML = days.map(d => `<div class="col"><div class="n">${d.km ? d.km.toFixed(1) : ''}</div>
+      <div class="b" style="height:${(d.km / max * 75).toFixed(1)}%"></div><div class="d">${d.label}</div></div>`).join('');
+    const best = (f, fmt) => { const v = h.length ? Math.max(...h.map(f)) : 0; return v > 0 ? fmt(v) : '–'; };
+    const tiles = [
+      ['Longest walk', best(x => x.dist, v => (v / 1000).toFixed(2) + '<span class="unit">km</span>')],
+      ['Longest time', best(x => x.time, fmtTime)],
+      ['Fastest average', best(x => x.time >= 60 ? x.dist / x.time * 3.6 : 0, v => v.toFixed(1) + '<span class="unit">km/h</span>')],
+      ['Most calories', best(x => x.kcal || 0, v => Math.round(v) + '<span class="unit">kcal</span>')],
+    ];
+    $('bests').innerHTML = tiles.map(([l, v]) => `<div class="tile"><div class="label">${l}</div><div class="val" style="font-size:24px">${v}</div></div>`).join('');
+  }
+
+  // ---------- voice ----------
+  function say(text) {
+    try { const u = new SpeechSynthesisUtterance(text); u.rate = 1; speechSynthesis.speak(u); } catch (e) {}
+  }
+  function announce() {
+    const w = state.walk, p = profile(), km = Math.floor(total(w.counters.dist) / 1000);
+    if (!w.spokenKm) w.spokenKm = 0;
+    if (km <= w.spokenKm) return;
+    w.spokenKm = km;
+    if (!state.voice) return;
+    const m = Math.floor(w.time / 60);
+    let t = `${km} kilometre${km > 1 ? 's' : ''}. ${m} minute${m === 1 ? '' : 's'}. ${Math.round(w.kcal)} calories.`;
+    const wk = weekMetres(p) / 1000, before = wk - 1;
+    if (wk >= goalOf(p) && before < goalOf(p)) t += ` Well done ${p.name}, weekly goal reached!`;
+    say(t);
+  }
+  $('voice').checked = !!state.voice;
+  $('voice').onchange = e => {
+    state.voice = e.target.checked; save();
+    if (state.voice) say('Voice is on.');          // iPhone needs a tap before it may speak
+  };
+
+  // ---------- tabs ----------
+  let tab = 'Walk';
+  try { tab = localStorage.getItem('walkkeeper.tab') || 'Walk'; } catch (e) {}
+  function showTab(t) {
+    tab = t;
+    document.querySelectorAll('.tabs button').forEach(b => b.classList.toggle('on', b.dataset.tab === t));
+    document.querySelectorAll('section').forEach(s => s.classList.toggle('on', s.id === 'tab' + t));
+    try { localStorage.setItem('walkkeeper.tab', t); } catch (e) {}
+    renderAll();
+  }
+  document.querySelector('.tabs').onclick = e => { if (e.target.dataset.tab) showTab(e.target.dataset.tab); };
   function renderHistory() {
     const p = profile(), h = p.history;
     $('histTitle').textContent = `Past walks: ${p.name}`;
@@ -279,7 +430,11 @@
         <button class="small" data-garmin="${i}">Garmin</button></div>`;
     }).join('') : '<div class="note">No walks saved yet.</div>';
   }
-  function renderAll() { render(); renderProfiles(); renderHistory(); }
+  function renderAll() {
+    render(); renderProfiles();
+    if (tab === 'Family') renderFamily();
+    if (tab === 'Stats') { renderStats(); renderHistory(); }
+  }
   function setStatus(t, cls = '') { const s = $('status'); s.textContent = t; s.className = cls; }
   function log(t) {
     const el = $('log');
@@ -293,7 +448,7 @@
   function openSheet(p, isNew) {
     editing = { p, isNew };
     $('sheetTitle').textContent = isNew ? 'New person' : 'Edit person';
-    $('fName').value = p.name; $('fKg').value = p.kg; $('fAge').value = p.age; $('fSex').value = p.sex;
+    $('fName').value = p.name; $('fKg').value = p.kg; $('fAge').value = p.age; $('fSex').value = p.sex; $('fGoal').value = goalOf(p);
     $('fDelete').style.display = !isNew && state.profiles.length > 1 ? '' : 'none';
     $('sheet').classList.add('open');
   }
@@ -305,13 +460,16 @@
   };
   $('fCancel').onclick = closeSheet;
   $('fSave').onclick = () => {
+    if (!editing) return;
     const { p, isNew } = editing;
     const name = $('fName').value.trim();
     const kg = parseFloat($('fKg').value), age = parseInt($('fAge').value, 10);
     if (!name) { alert('Type a name.'); return; }
     if (!(kg >= 20 && kg <= 300)) { alert('Type a weight between 20 and 300 kg.'); return; }
     if (!(age >= 5 && age <= 110)) { alert('Type an age between 5 and 110.'); return; }
-    Object.assign(p, { name, kg: Math.round(kg * 10) / 10, age, sex: $('fSex').value });
+    const goal = parseFloat($('fGoal').value);
+    if (!(goal >= 1 && goal <= 500)) { alert('Type a weekly goal between 1 and 500 km.'); return; }
+    Object.assign(p, { name, kg: Math.round(kg * 10) / 10, age, sex: $('fSex').value, goal: Math.round(goal * 10) / 10 });
     if (isNew) { state.profiles.push(p); state.active = p.id; }
     save(); closeSheet(); renderAll();
   };
@@ -379,6 +537,26 @@ ${tp}
     const p = profile(), x = p.history[+i], d = new Date(x.date);
     const name = `walk-${p.name.replace(/[^a-z0-9]+/gi, '-')}-${d.toISOString().slice(0, 16).replace(/[:T]/g, '-')}.tcx`;
     shareFile(name, toTcx(x, p));
+  };
+
+  // ---------- backup ----------
+  $('btnBackup').onclick = () => {
+    const d = new Date().toISOString().slice(0, 10);
+    shareFile(`walk-keeper-backup-${d}.json`, JSON.stringify(state));
+  };
+  $('btnRestore').onclick = () => $('fileRestore').click();
+  $('fileRestore').onchange = async e => {
+    const f = e.target.files[0]; e.target.value = '';
+    if (!f) return;
+    try {
+      const s = JSON.parse(await f.text());
+      if (!s.profiles || !s.profiles.length || !s.walk) throw new Error('not a Walk Keeper backup');
+      const n = s.profiles.reduce((a, p) => a + p.history.length, 0);
+      if (!confirm(`Load this backup?\n${s.profiles.length} people, ${n} walks.\n\nThis replaces what is on this phone now.`)) return;
+      state = s; save(); renderAll();
+      $('voice').checked = !!state.voice;
+      alert('Backup loaded.');
+    } catch (err) { alert('Could not load this file: ' + err.message); }
   };
 
   // ---------- Bluetooth: treadmill ----------
@@ -571,7 +749,7 @@ ${tp}
     }, 1000);
   }
 
-  save(); renderAll();
+  save(); showTab(['Walk', 'Family', 'Stats'].includes(tab) ? tab : 'Walk');
 })();
 </script>
 </body>
