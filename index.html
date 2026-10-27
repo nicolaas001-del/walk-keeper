@@ -610,14 +610,22 @@ ${tp}
   async function connect() {
     if (!navigator.bluetooth) {
       setStatus('This browser has no Bluetooth. On iPhone, open this page in the "Bluefy" app.', 'bad');
+      alert('This browser cannot use Bluetooth.\n\nOn iPhone, open this page in the "Bluefy" app (not Safari or Chrome).');
       return;
     }
+    setStatus('Looking for Bluetooth devices…');
     try {
       device = await navigator.bluetooth.requestDevice({
         acceptAllDevices: true,
         optionalServices: [FTMS, FITSHOW, 0x180a],
       });
-    } catch (e) { setStatus('No treadmill picked.', 'warn'); return; }
+    } catch (e) {
+      log('pick failed: ' + e.name + ': ' + e.message);
+      setStatus(e.name === 'NotFoundError' && /cancel/i.test(e.message)
+        ? 'No treadmill picked.'
+        : `Bluetooth problem: ${e.name}: ${e.message}`, 'warn');
+      return;
+    }
     wantConnected = true;
     device.addEventListener('gattserverdisconnected', onDisconnect);
     await openGatt();
