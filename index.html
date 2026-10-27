@@ -1,0 +1,354 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cut">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="theme-color" content="#0f1720">
+<title>Walk Keeper</title>
+<style>
+  :root {
+    --bg: #0f1720; --card: #18232f; --text: #eef3f7; --muted: #8fa3b5;
+    --accent: #3ddc97; --warn: #ffb547; --bad: #ff6b6b; --line: #263545;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; background: var(--bg); color: var(--text);
+    font: 16px/1.4 -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+    padding: max(16px, env(safe-area-inset-top)) 16px max(24px, env(safe-area-inset-bottom));
+  }
+  .wrap { max-width: 520px; margin: 0 auto; }
+  h1 { font-size: 20px; margin: 0 0 4px; }
+  #status { color: var(--muted); font-size: 14px; min-height: 20px; margin-bottom: 14px; }
+  #status.ok { color: var(--accent); } #status.warn { color: var(--warn); } #status.bad { color: var(--bad); }
+  .grid { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; }
+  .tile { background: var(--card); border-radius: 14px; padding: 14px; }
+  .tile.big { grid-column: span 2; text-align: center; padding: 20px 14px; }
+  .label { color: var(--muted); font-size: 12px; text-transform: uppercase; letter-spacing: .06em; }
+  .val { font-size: 30px; font-weight: 700; font-variant-numeric: tabular-nums; }
+  .big .val { font-size: 56px; }
+  .unit { font-size: 14px; color: var(--muted); font-weight: 400; margin-left: 3px; }
+  .row { display: flex; gap: 10px; margin-top: 12px; }
+  button {
+    flex: 1; border: 0; border-radius: 12px; padding: 16px 10px; font-size: 17px; font-weight: 600;
+    background: var(--card); color: var(--text); cursor: pointer;
+  }
+  button.primary { background: var(--accent); color: #06231a; }
+  button.danger { background: #3a1f24; color: #ffb3b3; }
+  button:disabled { opacity: .45; }
+  #controls { display: none; }
+  h2 { font-size: 15px; color: var(--muted); margin: 26px 0 8px; font-weight: 600; }
+  .hist { background: var(--card); border-radius: 12px; padding: 10px 14px; margin-bottom: 8px;
+          display: flex; justify-content: space-between; font-variant-numeric: tabular-nums; }
+  .hist small { color: var(--muted); }
+  details { margin-top: 26px; color: var(--muted); font-size: 13px; }
+  #log { white-space: pre-wrap; font: 11px/1.35 ui-monospace, Menlo, monospace; max-height: 240px;
+         overflow: auto; background: #0a1016; padding: 8px; border-radius: 8px; margin-top: 8px; }
+  .note { color: var(--muted); font-size: 13px; margin-top: 10px; }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <h1>Walk Keeper</h1>
+  <div id="status">Not connected.</div>
+
+  <div class="grid">
+    <div class="tile big"><div class="label">Walking time</div><div class="val" id="time">0:00</div></div>
+    <div class="tile big"><div class="label">Distance</div><div class="val"><span id="dist">0.00</span><span class="unit">km</span></div></div>
+    <div class="tile"><div class="label">Speed</div><div class="val"><span id="speed">0.0</span><span class="unit">km/h</span></div></div>
+    <div class="tile"><div class="label">Pace</div><div class="val"><span id="pace">–</span><span class="unit">/km</span></div></div>
+    <div class="tile"><div class="label">Steps</div><div class="val" id="steps">–</div></div>
+    <div class="tile"><div class="label">Calories</div><div class="val"><span id="kcal">–</span><span class="unit">kcal</span></div></div>
+  </div>
+
+  <div class="row">
+    <button class="primary" id="btnConnect">Connect treadmill</button>
+  </div>
+  <div class="row" id="controls">
+    <button id="btnSlower">− Slower</button>
+    <button id="btnStartStop">Start belt</button>
+    <button id="btnFaster">+ Faster</button>
+  </div>
+  <div class="row">
+    <button class="danger" id="btnFinish">Finish walk &amp; save</button>
+  </div>
+  <div class="note">Stop and start the treadmill as much as you like. The totals keep adding up until you push "Finish walk".</div>
+
+  <h2>Past walks</h2>
+  <div id="history"><div class="note">No walks saved yet.</div></div>
+
+  <details>
+    <summary>Technical log (for fixing problems)</summary>
+    <div id="log"></div>
+  </details>
+</div>
+
+<script>
+(() => {
+  'use strict';
+  const FTMS = 0x1826, FTMS_TREADMILL = 0x2acd, FTMS_CONTROL = 0x2ad9;
+  const FITSHOW = 0xfff0, FITSHOW_NOTIFY = 0xfff1, FITSHOW_WRITE = 0xfff2;
+  const KEY = 'walkkeeper.v1';
+  const $ = id => document.getElementById(id);
+
+  // ---------- saved state ----------
+  const blank = () => ({
+    time: 0,                                   // moving seconds, counted by the app
+    counters: { dist: blankCounter(), steps: blankCounter(), kcal: blankCounter() },
+    startedAt: null,
+  });
+  function blankCounter() { return { bank: 0, seg: 0 }; }
+  let state = { walk: blank(), history: [] };
+  try {
+    const s = JSON.parse(localStorage.getItem(KEY));
+    if (s && s.walk) state = s;
+  } catch (e) {}
+  function save() { try { localStorage.setItem(KEY, JSON.stringify(state)); } catch (e) {} }
+
+  // A treadmill counter (distance, steps, calories) goes back to 0 when the
+  // belt stops. When it drops, bank what we had and start a new segment.
+  function feedCounter(c, v) {
+    if (v == null || !isFinite(v)) return;
+    if (v + 0.5 < c.seg) { c.bank += c.seg; log(`counter reset seen, banked ${c.seg}`); }
+    c.seg = v;
+  }
+  const total = c => c.bank + c.seg;
+
+  // ---------- live data ----------
+  let live = { speed: 0, at: 0, hasDist: false, hasSteps: false, hasKcal: false };
+  let lastTick = Date.now();
+
+  function onReading(r) {
+    const w = state.walk;
+    if (r.speed != null) live.speed = r.speed;
+    live.at = Date.now();
+    if (r.dist != null) { live.hasDist = true; feedCounter(w.counters.dist, r.dist); }
+    if (r.steps != null) { live.hasSteps = true; feedCounter(w.counters.steps, r.steps); }
+    if (r.kcal != null) { live.hasKcal = true; feedCounter(w.counters.kcal, r.kcal); }
+    if (!w.startedAt && live.speed > 0.3) w.startedAt = Date.now();
+    save(); render();
+  }
+
+  // One tick per second: count walking time, and work out distance from
+  // speed if the treadmill does not send a distance.
+  setInterval(() => {
+    const now = Date.now(), dt = Math.min((now - lastTick) / 1000, 3);
+    lastTick = now;
+    const fresh = now - live.at < 5000;
+    if (!fresh) live.speed = 0;
+    if (fresh && live.speed > 0.3) {
+      state.walk.time += dt;
+      if (!live.hasDist) state.walk.counters.dist.bank += live.speed * dt / 3.6;
+      save();
+    }
+    render();
+  }, 1000);
+
+  // ---------- screen ----------
+  function fmtTime(s) {
+    s = Math.floor(s);
+    const h = Math.floor(s / 3600), m = Math.floor(s % 3600 / 60), x = s % 60;
+    return h ? `${h}:${String(m).padStart(2, '0')}:${String(x).padStart(2, '0')}` : `${m}:${String(x).padStart(2, '0')}`;
+  }
+  function render() {
+    const w = state.walk, km = total(w.counters.dist) / 1000;
+    $('time').textContent = fmtTime(w.time);
+    $('dist').textContent = km.toFixed(2);
+    $('speed').textContent = live.speed.toFixed(1);
+    $('pace').textContent = live.speed > 0.3 ? fmtTime(3600 / live.speed) : '–';
+    $('steps').textContent = live.hasSteps || total(w.counters.steps) ? Math.round(total(w.counters.steps)) : '–';
+    $('kcal').textContent = live.hasKcal || total(w.counters.kcal) ? Math.round(total(w.counters.kcal)) : '–';
+    $('btnStartStop').textContent = live.speed > 0.3 ? 'Stop belt' : 'Start belt';
+  }
+  function renderHistory() {
+    const h = state.history;
+    $('history').innerHTML = h.length ? h.slice().reverse().map(x => {
+      const d = new Date(x.date);
+      return `<div class="hist"><span>${d.toLocaleDateString()} <small>${d.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}</small></span>
+        <span>${(x.dist / 1000).toFixed(2)} km · ${fmtTime(x.time)}</span></div>`;
+    }).join('') : '<div class="note">No walks saved yet.</div>';
+  }
+  function setStatus(t, cls = '') { const s = $('status'); s.textContent = t; s.className = cls; }
+  function log(t) {
+    const el = $('log');
+    el.textContent = (new Date().toLocaleTimeString() + ' ' + t + '\n' + el.textContent).slice(0, 8000);
+  }
+  const hex = dv => [...new Uint8Array(dv.buffer, dv.byteOffset, dv.byteLength)].map(b => b.toString(16).padStart(2, '0')).join(' ');
+
+  $('btnFinish').onclick = () => {
+    const w = state.walk;
+    if (w.time < 5 && total(w.counters.dist) < 5) { alert('Nothing to save yet.'); return; }
+    if (!confirm(`Save this walk?\n${(total(w.counters.dist) / 1000).toFixed(2)} km in ${fmtTime(w.time)}\n\nThe counters then go back to zero.`)) return;
+    state.history.push({ date: w.startedAt || Date.now(), time: Math.round(w.time), dist: Math.round(total(w.counters.dist)),
+                         steps: Math.round(total(w.counters.steps)), kcal: Math.round(total(w.counters.kcal)) });
+    state.walk = blank();
+    // The treadmill's own counter may still show the last numbers; treat them as the start point.
+    for (const k in state.walk.counters) state.walk.counters[k].bank = -lastRaw[k];
+    save(); render(); renderHistory();
+  };
+
+  // ---------- Bluetooth ----------
+  let device = null, mode = null, ctrlChar = null, writeChar = null, pollTimer = null, wantConnected = false;
+  let lastRaw = { dist: 0, steps: 0, kcal: 0 };
+  let ftmsMerged = {};
+
+  function emit(r) {
+    for (const k of ['dist', 'steps', 'kcal']) if (r[k] != null) lastRaw[k] = r[k];
+    onReading(r);
+  }
+
+  // FTMS Treadmill Data (0x2ACD) — the open Bluetooth fitness standard.
+  function parseFtms(dv) {
+    const f = dv.getUint16(0, true), n = dv.byteLength;
+    let i = 2; const r = {};
+    const has = k => i + k <= n;
+    if (!(f & 0x0001) && has(2)) { r.speed = dv.getUint16(i, true) / 100; i += 2; }
+    if (f & 0x0002) i += 2;                                  // average speed
+    if (f & 0x0004 && has(3)) { r.dist = dv.getUint8(i) | dv.getUint8(i + 1) << 8 | dv.getUint8(i + 2) << 16; i += 3; }
+    if (f & 0x0008) i += 4;                                  // incline + ramp
+    if (f & 0x0010) i += 4;                                  // elevation gain
+    if (f & 0x0020) i += 1;                                  // pace
+    if (f & 0x0040) i += 1;                                  // average pace
+    if (f & 0x0080 && has(5)) { const e = dv.getUint16(i, true); if (e !== 0xffff) r.kcal = e; i += 5; }
+    if (f & 0x0100) i += 1;                                  // heart rate
+    if (f & 0x0200) i += 1;                                  // MET
+    if (f & 0x0400 && has(2)) { r.time = dv.getUint16(i, true); i += 2; }
+    return r;
+  }
+
+  // FitShow's own protocol (service FFF0). Frame: 02 cmd data.. xor 03
+  function fitshowFrame(bytes) {
+    let x = 0; for (const b of bytes) x ^= b;
+    return new Uint8Array([0x02, ...bytes, x, 0x03]);
+  }
+  function parseFitshow(dv) {
+    const b = new Uint8Array(dv.buffer, dv.byteOffset, dv.byteLength);
+    if (b[0] !== 0x02 || b[1] !== 0x51) return null;         // 0x51 = status
+    const st = b[2];
+    if (st !== 3 || b.length < 13) return { speed: 0 };       // 3 = running
+    return {
+      speed: b[3] / 10,
+      time: b[5] | b[6] << 8,
+      dist: b[7] | b[8] << 8,                                 // metres
+      kcal: (b[9] | b[10] << 8) / 10,
+      steps: b[11] | b[12] << 8,
+    };
+  }
+
+  async function connect() {
+    if (!navigator.bluetooth) {
+      setStatus('This browser has no Bluetooth. On iPhone, open this page in the "Bluefy" app.', 'bad');
+      return;
+    }
+    try {
+      device = await navigator.bluetooth.requestDevice({
+        acceptAllDevices: true,
+        optionalServices: [FTMS, FITSHOW, 0x180a],
+      });
+    } catch (e) { setStatus('No treadmill picked.', 'warn'); return; }
+    wantConnected = true;
+    device.addEventListener('gattserverdisconnected', onDisconnect);
+    await openGatt();
+  }
+
+  async function openGatt() {
+    try {
+      setStatus(`Connecting to ${device.name || 'treadmill'}…`);
+      const server = await device.gatt.connect();
+      clearInterval(pollTimer); ctrlChar = writeChar = null; mode = null;
+
+      try {
+        const svc = await server.getPrimaryService(FTMS);
+        const ch = await svc.getCharacteristic(FTMS_TREADMILL);
+        ch.addEventListener('characteristicvaluechanged', e => {
+          const dv = e.target.value; log('FTMS ' + hex(dv));
+          Object.assign(ftmsMerged, parseFtms(dv)); emit({ ...ftmsMerged });
+        });
+        await ch.startNotifications();
+        mode = 'FTMS';
+        try {
+          ctrlChar = await svc.getCharacteristic(FTMS_CONTROL);
+          await ctrlChar.startNotifications();
+          await ctrlChar.writeValue(new Uint8Array([0x00]));   // request control
+        } catch (e) { ctrlChar = null; log('no control: ' + e.message); }
+      } catch (e) { log('no FTMS: ' + e.message); }
+
+      if (!mode) {
+        const svc = await server.getPrimaryService(FITSHOW);
+        const nt = await svc.getCharacteristic(FITSHOW_NOTIFY);
+        writeChar = await svc.getCharacteristic(FITSHOW_WRITE);
+        nt.addEventListener('characteristicvaluechanged', e => {
+          const dv = e.target.value; log('FS ' + hex(dv));
+          const r = parseFitshow(dv); if (r) emit(r);
+        });
+        await nt.startNotifications();
+        mode = 'FitShow';
+        const ask = fitshowFrame([0x51]);
+        pollTimer = setInterval(() => writeChar.writeValueWithoutResponse
+          ? writeChar.writeValueWithoutResponse(ask).catch(() => {})
+          : writeChar.writeValue(ask).catch(() => {}), 1000);
+      }
+
+      $('controls').style.display = ctrlChar ? 'flex' : 'none';
+      $('btnConnect').textContent = 'Connected';
+      $('btnConnect').disabled = true;
+      setStatus(`Connected to ${device.name || 'treadmill'} (${mode}).`, 'ok');
+      log('connected, mode ' + mode);
+      keepAwake();
+    } catch (e) {
+      log('connect failed: ' + e.message);
+      setStatus('Could not connect: ' + e.message, 'bad');
+      if (wantConnected) setTimeout(retry, 3000);
+    }
+  }
+
+  function onDisconnect() {
+    clearInterval(pollTimer); live.speed = 0;
+    $('btnConnect').disabled = false; $('btnConnect').textContent = 'Reconnect';
+    setStatus('Connection lost. Trying again… Your walk is safe.', 'warn');
+    log('disconnected');
+    if (wantConnected) setTimeout(retry, 2000);
+  }
+  function retry() { if (device && !device.gatt.connected) openGatt(); }
+
+  $('btnConnect').onclick = () => (device ? openGatt() : connect());
+
+  // ---------- belt control (only when the treadmill allows FTMS control) ----------
+  async function ctrl(bytes) {
+    if (!ctrlChar) return;
+    try { await ctrlChar.writeValue(new Uint8Array(bytes)); } catch (e) { log('control failed: ' + e.message); }
+  }
+  function setSpeed(v) {
+    v = Math.max(0.5, Math.min(20, Math.round(v * 10) / 10));
+    const n = Math.round(v * 100);
+    ctrl([0x02, n & 0xff, n >> 8]);
+  }
+  $('btnFaster').onclick = () => setSpeed(live.speed + 0.5);
+  $('btnSlower').onclick = () => setSpeed(live.speed - 0.5);
+  $('btnStartStop').onclick = () => live.speed > 0.3 ? ctrl([0x08, 0x02]) : ctrl([0x07]);
+
+  // ---------- keep the screen on ----------
+  let lock = null;
+  async function keepAwake() {
+    try { if (navigator.wakeLock && !lock) { lock = await navigator.wakeLock.request('screen'); lock.onrelease = () => lock = null; } } catch (e) {}
+  }
+  document.addEventListener('visibilitychange', () => { if (document.visibilityState === 'visible' && device) keepAwake(); });
+
+  // ---------- demo mode for testing: add ?demo to the address ----------
+  if (location.search.includes('demo')) {
+    setStatus('Demo mode (fake treadmill).', 'ok');
+    let t = 0, d = 0;
+    setInterval(() => {
+      t++;
+      const running = t % 40 < 25;                 // walk 25 s, stop 15 s, repeat
+      if (!running && t % 40 === 25) d = 0;        // treadmill forgets its distance
+      if (running) d += 50;
+      emit({ speed: running ? 4.5 : 0, dist: d, steps: Math.round(d / 0.7) });
+    }, 1000);
+  }
+
+  render(); renderHistory();
+})();
+</script>
+</body>
+</html>
