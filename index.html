@@ -169,6 +169,7 @@
 
   <details>
     <summary>Technical log (for fixing problems)</summary>
+    <div class="row"><button class="primary" id="btnCopyLog">Copy log</button></div>
     <div class="row"><button id="btnFitshow">Search FitShow type</button></div>
     <div class="row"><button id="btnName">Search by name (FS-)</button></div>
     <div class="row"><button id="btnAll">Show all devices</button></div>
@@ -739,6 +740,16 @@ ${tp}
   $('btnAll').onclick = () => { device = null; connect('all'); };
   $('btnName').onclick = () => { device = null; connect('name'); };
   $('btnFitshow').onclick = () => { device = null; connect('fitshow'); };
+  $('btnCopyLog').onclick = async () => {
+    const text = `Walk Keeper log (${navigator.userAgent})\n` + $('log').textContent;
+    try { await navigator.clipboard.writeText(text); alert('Log copied. Paste it in the chat.'); }
+    catch (e) {
+      // No clipboard: select the text so it can be copied by hand.
+      const r = document.createRange(); r.selectNodeContents($('log'));
+      const s = getSelection(); s.removeAllRanges(); s.addRange(r);
+      alert('Could not copy by itself. The log is now selected: tap Copy.');
+    }
+  };
 
   // ---------- Bluetooth: heart rate (Garmin "Broadcast Heart Rate") ----------
   let hrDevice = null;
