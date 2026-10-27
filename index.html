@@ -533,7 +533,7 @@ ${tp}
     const file = new File([text], name, { type: 'application/xml' });
     try {
       if (navigator.canShare && navigator.canShare({ files: [file] })) { await navigator.share({ files: [file], title: name }); return; }
-    } catch (e) { if (e.name === 'AbortError') return; log('share failed: ' + e.message); }
+    } catch (e) { if (e.name === 'AbortError') return; log('share failed: ' + errText(e)); }
     const a = document.createElement('a');
     a.href = URL.createObjectURL(file); a.download = name;
     document.body.appendChild(a); a.click(); a.remove();
@@ -615,7 +615,18 @@ ${tp}
     };
   }
 
-  // how: 'type' (treadmill services), 'name' (FS- name), 'all' (every device)
+  const uuid = n => `0000${n.toString(16).padStart(4, '0')}-0000-1000-8000-00805f9b34fb`;
+  // Bluefy can throw things that are not Error objects; get some text out of anything.
+  function errText(e) {
+    if (e == null) return 'unknown error (empty)';
+    if (typeof e === 'string') return e;
+    const t = [e.name, e.message].filter(Boolean).join(': ');
+    if (t) return t;
+    try { const j = JSON.stringify(e); if (j && j !== '{}') return j; } catch (x) {}
+    return String(e);
+  }
+
+  // how: 'type' (FTMS service), 'fitshow' (FFF0 service), 'name' (FS- name), 'all' (every device)
   async function connect(how = 'type') {
     if (!navigator.bluetooth) {
       setStatus('This browser has no Bluetooth. On iPhone, open this page in the "Bluefy" app.', 'bad');
@@ -626,19 +637,22 @@ ${tp}
     try {
       // Bluefy (iPhone) does not open the list for "accept all devices",
       // so normally we ask for treadmill services and FitShow names.
-      const optionalServices = [FTMS, FITSHOW, 0x180a];
+      // Bluefy (iPhone) fails on "optionalServices" with an empty error, so the
+      // main searches use one service filter only, like the heart-rate search.
+      // Full 128-bit IDs: some browsers do not accept the short numbers.
+      const optionalServices = [uuid(FTMS), uuid(FITSHOW)];
       log('searching by ' + how);
       device = await navigator.bluetooth.requestDevice(
         how === 'all' ? { acceptAllDevices: true, optionalServices }
         : how === 'name' ? { filters: [{ namePrefix: 'FS-' }], optionalServices }
-        : how === 'fitshow' ? { filters: [{ services: [FITSHOW] }], optionalServices: [FTMS, 0x180a] }
-        // Same shape as the heart-rate search, which Bluefy shows: one filter, one service.
-        : { filters: [{ services: [FTMS] }], optionalServices: [FITSHOW, 0x180a] });
+        : how === 'fitshow' ? { filters: [{ services: [uuid(FITSHOW)] }] }
+        : { filters: [{ services: [uuid(FTMS)] }] });
     } catch (e) {
-      log('pick failed: ' + e.name + ': ' + e.message);
-      const cancelled = e.name === 'NotFoundError' && /cancel/i.test(e.message);
-      setStatus(cancelled ? 'No treadmill picked.' : `Bluetooth problem: ${e.name}: ${e.message}`, 'warn');
-      if (!cancelled) alert(`Bluetooth problem (search: ${how})\n\n${e.name}: ${e.message}`);
+      const msg = errText(e);
+      log('pick failed: ' + msg);
+      const cancelled = /cancel/i.test(msg);
+      setStatus(cancelled ? 'No treadmill picked.' : `Bluetooth problem: ${msg}`, 'warn');
+      if (!cancelled) alert(`Bluetooth problem (search: ${how})\n\n${msg}`);
       return;
     }
     wantConnected = true;
@@ -653,8 +667,8 @@ ${tp}
       clearInterval(pollTimer); ctrlChar = writeChar = null; mode = null;
 
       try {
-        const svc = await server.getPrimaryService(FTMS);
-        const ch = await svc.getCharacteristic(FTMS_TREADMILL);
+        const svc = await server.getPrimaryService(uuid(FTMS));
+        const ch = await svc.getCharacteristic(uuid(FTMS_TREADMILL));
         ch.addEventListener('characteristicvaluechanged', e => {
           const dv = e.target.value; log('FTMS ' + hex(dv));
           Object.assign(ftmsMerged, parseFtms(dv)); emit({ ...ftmsMerged });
@@ -662,18 +676,18 @@ ${tp}
         await ch.startNotifications();
         mode = 'FTMS';
         try {
-          ctrlChar = await svc.getCharacteristic(FTMS_CONTROL);
+          ctrlChar = await svc.getCharacteristic(uuid(FTMS_CONTROL));
           // Reply: 80 <command> <result>. Result 01 = OK, 02/03/04/05 = refused.
           ctrlChar.addEventListener('characteristicvaluechanged', e => log('control reply ' + hex(e.target.value)));
           await ctrlChar.startNotifications();
           await ctrlChar.writeValue(new Uint8Array([0x00]));   // request control
-        } catch (e) { ctrlChar = null; log('no control: ' + e.message); }
-      } catch (e) { log('no FTMS: ' + e.message); }
+        } catch (e) { ctrlChar = null; log('no control: ' + errText(e)); }
+      } catch (e) { log('no FTMS: ' + errText(e)); }
 
       if (!mode) {
-        const svc = await server.getPrimaryService(FITSHOW);
-        const nt = await svc.getCharacteristic(FITSHOW_NOTIFY);
-        writeChar = await svc.getCharacteristic(FITSHOW_WRITE);
+        const svc = await server.getPrimaryService(uuid(FITSHOW));
+        const nt = await svc.getCharacteristic(uuid(FITSHOW_NOTIFY));
+        writeChar = await svc.getCharacteristic(uuid(FITSHOW_WRITE));
         nt.addEventListener('characteristicvaluechanged', e => {
           const dv = e.target.value; log('FS ' + hex(dv));
           const r = parseFitshow(dv); if (r) emit(r);
@@ -693,8 +707,8 @@ ${tp}
       log(`connected, mode ${mode}, name "${device.name || ''}", control ${ctrlChar ? 'yes' : 'no'}`);
       keepAwake();
     } catch (e) {
-      log('connect failed: ' + e.message);
-      setStatus('Could not connect: ' + e.message, 'bad');
+      log('connect failed: ' + errText(e));
+      setStatus('Could not connect: ' + errText(e), 'bad');
       if (wantConnected) setTimeout(retry, 3000);
     }
   }
@@ -719,7 +733,7 @@ ${tp}
     if (!navigator.bluetooth) { setStatus('This browser has no Bluetooth. On iPhone, use the "Bluefy" app.', 'bad'); return; }
     try {
       if (!hrDevice) {
-        hrDevice = await navigator.bluetooth.requestDevice({ filters: [{ services: [HRS] }] });
+        hrDevice = await navigator.bluetooth.requestDevice({ filters: [{ services: [uuid(HRS)] }] });
         hrDevice.addEventListener('gattserverdisconnected', () => {
           $('btnHr').textContent = 'Reconnect heart rate'; $('btnHr').disabled = false;
           log('heart rate disconnected');
@@ -727,7 +741,7 @@ ${tp}
         });
       }
       const server = await hrDevice.gatt.connect();
-      const ch = await (await server.getPrimaryService(HRS)).getCharacteristic(HR_MEASURE);
+      const ch = await (await server.getPrimaryService(uuid(HRS))).getCharacteristic(uuid(HR_MEASURE));
       ch.addEventListener('characteristicvaluechanged', e => {
         const dv = e.target.value;
         onHr(dv.getUint8(0) & 1 ? dv.getUint16(1, true) : dv.getUint8(1));
@@ -736,8 +750,8 @@ ${tp}
       $('btnHr').textContent = `Heart rate: ${hrDevice.name || 'connected'}`; $('btnHr').disabled = true;
       log('heart rate connected');
     } catch (e) {
-      log('heart rate failed: ' + e.message);
-      if (e.name !== 'NotFoundError') setStatus('Heart rate: ' + e.message, 'warn');
+      log('heart rate failed: ' + errText(e));
+      if (e.name !== 'NotFoundError') setStatus('Heart rate: ' + errText(e), 'warn');
     }
   }
   $('btnHr').onclick = connectHr;
@@ -751,7 +765,7 @@ ${tp}
       await ctrlChar.writeValue(new Uint8Array(bytes));
       log('control sent ' + bytes.map(b => b.toString(16).padStart(2, '0')).join(' '));
       return true;
-    } catch (e) { log('control failed: ' + e.message); return false; }
+    } catch (e) { log('control failed: ' + errText(e)); return false; }
   }
   function setSpeed(v) {
     v = Math.max(0.5, Math.min(20, Math.round(v * 10) / 10));
