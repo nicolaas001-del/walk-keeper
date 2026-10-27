@@ -169,7 +169,8 @@
 
   <details>
     <summary>Technical log (for fixing problems)</summary>
-    <div class="row"><button id="btnAll">Treadmill not in the list? Show all devices</button></div>
+    <div class="row"><button id="btnName">Search by name (FS-)</button></div>
+    <div class="row"><button id="btnAll">Show all devices</button></div>
     <div id="log"></div>
   </details>
 </div>
@@ -613,7 +614,8 @@ ${tp}
     };
   }
 
-  async function connect(showAll = false) {
+  // how: 'type' (treadmill services), 'name' (FS- name), 'all' (every device)
+  async function connect(how = 'type') {
     if (!navigator.bluetooth) {
       setStatus('This browser has no Bluetooth. On iPhone, open this page in the "Bluefy" app.', 'bad');
       alert('This browser cannot use Bluetooth.\n\nOn iPhone, open this page in the "Bluefy" app (not Safari or Chrome).');
@@ -623,13 +625,12 @@ ${tp}
     try {
       // Bluefy (iPhone) does not open the list for "accept all devices",
       // so normally we ask for treadmill services and FitShow names.
-      device = await navigator.bluetooth.requestDevice(showAll
-        ? { acceptAllDevices: true, optionalServices: [FTMS, FITSHOW, 0x180a] }
-        : {
-            // Only service filters: Bluefy fails on name filters, and this treadmill has no name.
-            filters: [{ services: [FTMS] }, { services: [FITSHOW] }],
-            optionalServices: [FTMS, FITSHOW, 0x180a],
-          });
+      const optionalServices = [FTMS, FITSHOW, 0x180a];
+      log('searching by ' + how);
+      device = await navigator.bluetooth.requestDevice(
+        how === 'all' ? { acceptAllDevices: true, optionalServices }
+        : how === 'name' ? { filters: [{ namePrefix: 'FS-' }], optionalServices }
+        : { filters: [{ services: [FTMS] }, { services: [FITSHOW] }], optionalServices });
     } catch (e) {
       log('pick failed: ' + e.name + ': ' + e.message);
       setStatus(e.name === 'NotFoundError' && /cancel/i.test(e.message)
@@ -705,7 +706,8 @@ ${tp}
   function retry() { if (device && !device.gatt.connected) openGatt(); }
 
   $('btnConnect').onclick = () => (device ? openGatt() : connect());
-  $('btnAll').onclick = () => { device = null; connect(true); };
+  $('btnAll').onclick = () => { device = null; connect('all'); };
+  $('btnName').onclick = () => { device = null; connect('name'); };
 
   // ---------- Bluetooth: heart rate (Garmin "Broadcast Heart Rate") ----------
   let hrDevice = null;
