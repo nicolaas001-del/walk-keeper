@@ -43,6 +43,7 @@
   }
   button.primary { background: var(--accent); color: #06231a; }
   button.danger { background: #3a1f24; color: #ffb3b3; }
+  button.stop { background: #e5484d; color: #fff; font-size: 22px; padding: 20px 10px; }
   button.small { flex: 0 0 auto; padding: 8px 12px; font-size: 14px; border-radius: 10px; }
   button:disabled { opacity: .45; }
   #controls { display: none; }
@@ -120,10 +121,15 @@
   <div class="row">
     <button id="btnHr">Connect Garmin heart rate</button>
   </div>
-  <div class="row" id="controls">
-    <button id="btnSlower">− Slower</button>
-    <button id="btnStartStop">Start belt</button>
-    <button id="btnFaster">+ Faster</button>
+  <div id="controls">
+    <div class="row">
+      <button class="stop" id="btnStop">■ STOP</button>
+    </div>
+    <div class="row">
+      <button id="btnSlower">− Slower</button>
+      <button id="btnStart">▶ Start</button>
+      <button id="btnFaster">+ Faster</button>
+    </div>
   </div>
   <div class="row">
     <button class="danger" id="btnFinish">Finish walk &amp; save</button>
@@ -313,7 +319,6 @@
     $('hr').textContent = hrFresh() ? live.hr : '–';
     $('incline').textContent = Math.round(live.incline * 10) / 10;
     $('steps').textContent = live.hasSteps || total(w.counters.steps) ? Math.round(total(w.counters.steps)) : '–';
-    $('btnStartStop').textContent = live.speed > 0.3 ? 'Stop belt' : 'Start belt';
   }
   // ---------- stats helpers ----------
   const sum = (list, k) => list.reduce((a, x) => a + (x[k] || 0), 0);
@@ -621,11 +626,8 @@ ${tp}
       device = await navigator.bluetooth.requestDevice(showAll
         ? { acceptAllDevices: true, optionalServices: [FTMS, FITSHOW, 0x180a] }
         : {
-            filters: [
-              { services: [FTMS] }, { services: [FITSHOW] },
-              { namePrefix: 'FS' }, { namePrefix: 'Fs' }, { namePrefix: 'fs' },
-              { namePrefix: 'FIT' }, { namePrefix: 'Fit' }, { namePrefix: 'TM' }, { namePrefix: 'Tread' },
-            ],
+            // Only service filters: Bluefy fails on name filters, and this treadmill has no name.
+            filters: [{ services: [FTMS] }, { services: [FITSHOW] }],
             optionalServices: [FTMS, FITSHOW, 0x180a],
           });
     } catch (e) {
@@ -657,6 +659,8 @@ ${tp}
         mode = 'FTMS';
         try {
           ctrlChar = await svc.getCharacteristic(FTMS_CONTROL);
+          // Reply: 80 <command> <result>. Result 01 = OK, 02/03/04/05 = refused.
+          ctrlChar.addEventListener('characteristicvaluechanged', e => log('control reply ' + hex(e.target.value)));
           await ctrlChar.startNotifications();
           await ctrlChar.writeValue(new Uint8Array([0x00]));   // request control
         } catch (e) { ctrlChar = null; log('no control: ' + e.message); }
@@ -678,11 +682,11 @@ ${tp}
           : writeChar.writeValue(ask).catch(() => {}), 1000);
       }
 
-      $('controls').style.display = ctrlChar ? 'flex' : 'none';
+      $('controls').style.display = ctrlChar ? 'block' : 'none';
       $('btnConnect').textContent = 'Treadmill connected';
       $('btnConnect').disabled = true;
       setStatus(`Connected to ${device.name || 'treadmill'} (${mode}).`, 'ok');
-      log('connected, mode ' + mode);
+      log(`connected, mode ${mode}, name "${device.name || ''}", control ${ctrlChar ? 'yes' : 'no'}`);
       keepAwake();
     } catch (e) {
       log('connect failed: ' + e.message);
@@ -733,9 +737,15 @@ ${tp}
   $('btnHr').onclick = connectHr;
 
   // ---------- belt control (only when the treadmill allows FTMS control) ----------
+  // Ask for control again before every command: some treadmills drop it.
   async function ctrl(bytes) {
-    if (!ctrlChar) return;
-    try { await ctrlChar.writeValue(new Uint8Array(bytes)); } catch (e) { log('control failed: ' + e.message); }
+    if (!ctrlChar) return false;
+    try {
+      await ctrlChar.writeValue(new Uint8Array([0x00]));
+      await ctrlChar.writeValue(new Uint8Array(bytes));
+      log('control sent ' + bytes.map(b => b.toString(16).padStart(2, '0')).join(' '));
+      return true;
+    } catch (e) { log('control failed: ' + e.message); return false; }
   }
   function setSpeed(v) {
     v = Math.max(0.5, Math.min(20, Math.round(v * 10) / 10));
@@ -744,7 +754,17 @@ ${tp}
   }
   $('btnFaster').onclick = () => setSpeed(live.speed + 0.5);
   $('btnSlower').onclick = () => setSpeed(live.speed - 0.5);
-  $('btnStartStop').onclick = () => live.speed > 0.3 ? ctrl([0x08, 0x02]) : ctrl([0x07]);
+  $('btnStart').onclick = () => ctrl([0x07]);
+  // Stop (0x08 0x01). If the treadmill refuses, try pause (0x08 0x02), then speed 0.
+  $('btnStop').onclick = async () => {
+    setStatus('Stopping…', 'warn');
+    const ok = await ctrl([0x08, 0x01]);
+    setTimeout(async () => {
+      if (live.speed > 0.3) { log('still moving, trying pause'); await ctrl([0x08, 0x02]); }
+      setTimeout(() => { if (live.speed > 0.3) { log('still moving, speed 0'); ctrl([0x02, 0, 0]); } }, 1500);
+    }, 1500);
+    if (!ok) setStatus('The app could not send STOP. Use the treadmill\'s own stop button or safety key.', 'bad');
+  };
 
   // ---------- keep the screen on ----------
   let lock = null;
