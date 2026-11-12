@@ -606,7 +606,8 @@ ${tp}
   // The server keeps every person and every walk. Each device keeps its own walk
   // that is going on now, and sends finished walks and person changes.
   // The server joins what every device sends, so nothing is lost.
-  const API = /github\.io$/.test(location.hostname) ? 'https://walk.statix.engineering' : '';
+  // The GitHub copy uses the sslip.io name of the server: it works without any DNS setup.
+  const API = /github\.io$/.test(location.hostname) ? 'https://walk.184-174-35-25.sslip.io' : '';
   const canSync = location.protocol === 'https:' || ['localhost', '127.0.0.1'].includes(location.hostname);
   let localRev = 0, syncing = false, syncAgain = false, cloudMsg = null;
   function changed() { localRev++; }
