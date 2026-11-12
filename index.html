@@ -47,6 +47,10 @@
   button.small { flex: 0 0 auto; padding: 8px 12px; font-size: 14px; border-radius: 10px; }
   button:disabled { opacity: .45; }
   #controls { display: none; }
+  #presets button { padding: 14px 4px; font-size: 18px; font-variant-numeric: tabular-nums; }
+  #presets button.on { background: var(--accent); color: #06231a; }
+  #presets small { font-size: 11px; font-weight: 400; opacity: .7; }
+  button.paused { background: var(--warn); color: #2a1a00; }
   h2 { font-size: 15px; color: var(--muted); margin: 26px 0 8px; font-weight: 600; }
   .hist { background: var(--card); border-radius: 12px; padding: 10px 14px; margin-bottom: 8px;
           display: flex; justify-content: space-between; align-items: center; gap: 10px;
@@ -126,15 +130,23 @@
       <button class="stop" id="btnStop">■ STOP</button>
     </div>
     <div class="row">
+      <button class="primary" id="btnStart">▶ Start</button>
+      <button id="btnPause">❚❚ Pause</button>
+    </div>
+    <div class="row">
       <button id="btnSlower">− Slower</button>
-      <button id="btnStart">▶ Start</button>
       <button id="btnFaster">+ Faster</button>
+    </div>
+    <div class="row" id="presets"></div>
+    <div class="note" style="display:flex;justify-content:space-between;align-items:center;gap:8px">
+      <span>Tap a speed to go straight to it.</span>
+      <button class="small" id="btnPresetEdit">Change speeds</button>
     </div>
   </div>
   <div class="row">
     <button class="danger" id="btnFinish">Finish walk &amp; save</button>
   </div>
-  <div class="note">Stop and start the treadmill as much as you like. The totals keep adding up until you push "Finish walk".</div>
+  <div class="note">Pause, stop and start the treadmill as much as you like. The time and distance keep adding up until you push "Finish walk".</div>
   <label class="toggle"><span>Speak every kilometre</span><input type="checkbox" id="voice"></label>
   </section>
 
@@ -301,7 +313,7 @@
       announce();
       save();
     }
-    render(); renderProfiles();
+    render(); renderProfiles(); renderControls();
     if (tab === 'Family') renderFamily();
     if (tab === 'Stats') renderStats();
   }, 1000);
@@ -570,11 +582,18 @@ ${tp}
 
   // ---------- Bluetooth: treadmill ----------
   let device = null, mode = null, ctrlChar = null, writeChar = null, pollTimer = null, wantConnected = false;
+  let connecting = false, retryTimer = null, retryDelay = 2000, dataTimer = null, noDataRetried = false;
   let lastRaw = { dist: 0, steps: 0 };
-  let ftmsMerged = {};
+  let ftmsMerged = {}, gotData = false;
+  const DEVICE_KEY = 'walkkeeper.device';
+  const sleep = ms => new Promise(r => setTimeout(r, ms));
+  // Windows Bluetooth can wait for ever. Give each step a time limit.
+  const withTimeout = (p, ms, what) => Promise.race([p,
+    new Promise((_, rej) => setTimeout(() => rej(new Error(`${what} took too long`)), ms))]);
 
   function emit(r) {
     for (const k of ['dist', 'steps']) if (r[k] != null) lastRaw[k] = r[k];
+    if (!gotData) { gotData = true; if (device) setStatus(`Connected to ${device.name || 'treadmill'}.`, 'ok'); }
     onReading(r);
   }
 
@@ -627,23 +646,29 @@ ${tp}
     return String(e);
   }
 
+  function useDevice(d) {
+    device = d;
+    wantConnected = true; noDataRetried = false; retryDelay = 2000;
+    device.addEventListener('gattserverdisconnected', onDisconnect);   // same function: added only once
+  }
+
   // how: 'type' (FTMS service), 'fitshow' (FFF0 service), 'name' (FS- name), 'all' (every device)
   async function connect(how = 'type') {
     if (!navigator.bluetooth) {
-      setStatus('This browser has no Bluetooth. On iPhone, open this page in the "Bluefy" app.', 'bad');
-      alert('This browser cannot use Bluetooth.\n\nOn iPhone, open this page in the "Bluefy" app (not Safari or Chrome).');
+      setStatus('This browser has no Bluetooth. On a PC, use Chrome or Edge. On iPhone, use the "Bluefy" app.', 'bad');
+      alert('This browser cannot use Bluetooth.\n\nOn a PC, use Chrome or Edge.\nOn iPhone, open this page in the "Bluefy" app.');
       return;
     }
     setStatus('Looking for Bluetooth devices…');
+    let picked;
     try {
       // Bluefy (iPhone) does not open the list for "accept all devices",
-      // so normally we ask for treadmill services and FitShow names.
-      // Bluefy (iPhone) fails on "optionalServices" with an empty error, so the
+      // and fails on "optionalServices" with an empty error, so the
       // main searches use one service filter only, like the heart-rate search.
       // Full 128-bit IDs: some browsers do not accept the short numbers.
       const optionalServices = [uuid(FTMS), uuid(FITSHOW)];
       log('searching by ' + how);
-      device = await navigator.bluetooth.requestDevice(
+      picked = await navigator.bluetooth.requestDevice(
         how === 'all' ? { acceptAllDevices: true, optionalServices }
         : how === 'name' ? { filters: [{ namePrefix: 'FS-' }], optionalServices }
         : how === 'fitshow' ? { filters: [{ services: [uuid(FITSHOW)] }] }
@@ -656,90 +681,129 @@ ${tp}
       if (!cancelled) alert(`Bluetooth problem (search: ${how})\n\n${msg}`);
       return;
     }
-    wantConnected = true;
-    device.addEventListener('gattserverdisconnected', onDisconnect);
+    if (device && device !== picked) { wantConnected = false; try { device.gatt.disconnect(); } catch (e) {} }
+    useDevice(picked);
     await openGatt();
   }
 
-  async function openGatt() {
+  // Chrome on a PC can remember the treadmill. Then the app connects by itself when it opens.
+  async function connectRemembered() {
+    if (!navigator.bluetooth || !navigator.bluetooth.getDevices) return;
+    let id = null; try { id = localStorage.getItem(DEVICE_KEY); } catch (e) {}
+    if (!id) return;
     try {
-      setStatus(`Connecting to ${device.name || 'treadmill'}…`);
-      const server = await device.gatt.connect();
-      clearInterval(pollTimer); ctrlChar = writeChar = null; mode = null;
+      const d = (await navigator.bluetooth.getDevices()).find(x => x.id === id);
+      if (!d) return;
+      log(`remembered treadmill "${d.name || ''}", connecting`);
+      useDevice(d);
+      await openGatt();
+    } catch (e) { log('remembered connect failed: ' + errText(e)); }
+  }
 
+  async function setupServices(server) {
+    clearInterval(pollTimer); ctrlChar = writeChar = null; mode = null; ftmsMerged = {};
+    try {
+      const svc = await server.getPrimaryService(uuid(FTMS));
+      const ch = await svc.getCharacteristic(uuid(FTMS_TREADMILL));
+      // "on..." in place of addEventListener, so a reconnect never adds a second listener
+      ch.oncharacteristicvaluechanged = e => {
+        const dv = e.target.value; log('FTMS ' + hex(dv));
+        Object.assign(ftmsMerged, parseFtms(dv)); emit({ ...ftmsMerged });
+      };
+      await ch.startNotifications();
+      mode = 'FTMS';
       try {
-        const svc = await server.getPrimaryService(uuid(FTMS));
-        const ch = await svc.getCharacteristic(uuid(FTMS_TREADMILL));
-        ch.addEventListener('characteristicvaluechanged', e => {
-          const dv = e.target.value; log('FTMS ' + hex(dv));
-          Object.assign(ftmsMerged, parseFtms(dv)); emit({ ...ftmsMerged });
-        });
-        await ch.startNotifications();
-        mode = 'FTMS';
-        try {
-          ctrlChar = await svc.getCharacteristic(uuid(FTMS_CONTROL));
-          // Reply: 80 <command> <result>. Result 01 = OK, 02/03/04/05 = refused.
-          ctrlChar.addEventListener('characteristicvaluechanged', e => log('control reply ' + hex(e.target.value)));
-          await ctrlChar.startNotifications();
-          await bleWrite(ctrlChar, [0x00]);                       // request control
-        } catch (e) { ctrlChar = null; log('no control: ' + errText(e)); }
-      } catch (e) { log('no FTMS: ' + errText(e)); }
+        const c = await svc.getCharacteristic(uuid(FTMS_CONTROL));
+        c.oncharacteristicvaluechanged = e => onCtrlReply(e.target.value);
+        await c.startNotifications();
+        ctrlChar = c;
+      } catch (e) { ctrlChar = null; log('no control: ' + errText(e)); }
+    } catch (e) { log('no FTMS: ' + errText(e)); }
 
-      // FitShow's own command channel. The FitShow app starts and stops the belt
-      // this way, so we keep it next to FTMS when the browser lets us reach it.
-      if (mode === 'FTMS') {
-        try {
-          const fs = await server.getPrimaryService(uuid(FITSHOW));
-          writeChar = await fs.getCharacteristic(uuid(FITSHOW_WRITE));
-          try {
-            const nt = await fs.getCharacteristic(uuid(FITSHOW_NOTIFY));
-            nt.addEventListener('characteristicvaluechanged', e => log('FS reply ' + hex(e.target.value)));
-            await nt.startNotifications();
-          } catch (e) {}
-          log('FitShow commands available');
-        } catch (e) { writeChar = null; log('no FitShow commands: ' + errText(e)); }
-      }
-
+    // FitShow's own command channel. Only a fallback when FTMS does not move the belt.
+    try {
+      const fs = await server.getPrimaryService(uuid(FITSHOW));
+      const nt = await fs.getCharacteristic(uuid(FITSHOW_NOTIFY));
+      writeChar = await fs.getCharacteristic(uuid(FITSHOW_WRITE));
+      nt.oncharacteristicvaluechanged = e => {
+        const dv = e.target.value; log('FS ' + hex(dv));
+        if (mode === 'FitShow') { const r = parseFitshow(dv); if (r) emit(r); }
+      };
+      await nt.startNotifications();
+      log('FitShow commands available');
       if (!mode) {
-        const svc = await server.getPrimaryService(uuid(FITSHOW));
-        const nt = await svc.getCharacteristic(uuid(FITSHOW_NOTIFY));
-        writeChar = await svc.getCharacteristic(uuid(FITSHOW_WRITE));
-        nt.addEventListener('characteristicvaluechanged', e => {
-          const dv = e.target.value; log('FS ' + hex(dv));
-          const r = parseFitshow(dv); if (r) emit(r);
-        });
-        await nt.startNotifications();
         mode = 'FitShow';
         const ask = fitshowFrame([0x51]);
         pollTimer = setInterval(() => bleWrite(writeChar, ask, true).catch(() => {}), 1000);
       }
+    } catch (e) { writeChar = null; log('no FitShow commands: ' + errText(e)); }
 
-      $('controls').style.display = ctrlChar || writeChar ? 'block' : 'none';
-      $('btnConnect').textContent = 'Treadmill connected';
-      $('btnConnect').disabled = true;
-      setStatus(`Connected to ${device.name || 'treadmill'} (${mode}).`, 'ok');
-      log(`connected, mode ${mode}, name "${device.name || ''}", FTMS control ${ctrlChar ? 'yes' : 'no'}, FitShow control ${writeChar ? 'yes' : 'no'}`);
-      keepAwake();
-    } catch (e) {
-      log('connect failed: ' + errText(e));
-      setStatus('Could not connect: ' + errText(e), 'bad');
-      if (wantConnected) setTimeout(retry, 3000);
+    if (!mode) throw new Error('No treadmill data found on this device');
+    if (ctrlChar) {
+      const r = await ctrl(null);                         // ask for control once now
+      log('FTMS control at connect: ' + (RESULT[r] || r));
     }
   }
 
-  function onDisconnect() {
-    clearInterval(pollTimer); live.speed = 0;
-    $('btnConnect').disabled = false; $('btnConnect').textContent = 'Reconnect treadmill';
-    setStatus('Connection lost. Trying again… Your walk is safe.', 'warn');
-    log('disconnected');
-    if (wantConnected) setTimeout(retry, 2000);
+  async function openGatt() {
+    if (connecting || !device) return;
+    connecting = true; clearTimeout(retryTimer); clearTimeout(dataTimer);
+    gotData = false;
+    $('btnConnect').disabled = true; $('btnConnect').textContent = 'Connecting…';
+    try {
+      setStatus(`Connecting to ${device.name || 'treadmill'}…`);
+      const server = await withTimeout(device.gatt.connect(), 12000, 'Connecting');
+      await withTimeout(setupServices(server), 15000, 'Reading the treadmill services');
+      retryDelay = 2000;
+      try { localStorage.setItem(DEVICE_KEY, device.id); } catch (e) {}
+      $('controls').style.display = ctrlChar || writeChar ? 'block' : 'none';
+      $('btnConnect').textContent = 'Treadmill connected';
+      setStatus(`Connected to ${device.name || 'treadmill'}. Waiting for numbers…`, 'ok');
+      log(`connected, mode ${mode}, name "${device.name || ''}", FTMS control ${ctrlChar ? 'yes' : 'no'}, FitShow control ${writeChar ? 'yes' : 'no'}`);
+      keepAwake();
+      // "Connected" but no numbers: the link is half open. Connect once more.
+      dataTimer = setTimeout(() => {
+        if (gotData || !device || !device.gatt.connected) return;
+        if (!noDataRetried) {
+          noDataRetried = true;
+          log('no data after 10 s, connecting again');
+          setStatus('No numbers from the treadmill. Connecting again…', 'warn');
+          try { device.gatt.disconnect(); } catch (e) {}
+        } else {
+          setStatus('Connected, but no numbers yet. This is OK if the belt is stopped. Push Start.', 'warn');
+        }
+      }, 10000);
+    } catch (e) {
+      log('connect failed: ' + errText(e));
+      try { device.gatt.disconnect(); } catch (x) {}
+      $('btnConnect').disabled = false; $('btnConnect').textContent = 'Connect treadmill';
+      if (wantConnected) {
+        setStatus(`Could not connect (${errText(e)}). Trying again in ${Math.round(retryDelay / 1000)} s…`, 'warn');
+        scheduleRetry();
+      } else setStatus('Could not connect: ' + errText(e), 'bad');
+    } finally { connecting = false; }
   }
-  function retry() { if (device && !device.gatt.connected) openGatt(); }
 
-  $('btnConnect').onclick = () => (device ? openGatt() : connect());
-  $('btnAll').onclick = () => { device = null; connect('all'); };
-  $('btnName').onclick = () => { device = null; connect('name'); };
-  $('btnFitshow').onclick = () => { device = null; connect('fitshow'); };
+  function scheduleRetry() {
+    clearTimeout(retryTimer);
+    retryTimer = setTimeout(retry, retryDelay);
+    retryDelay = Math.min(retryDelay * 2, 20000);
+  }
+  function onDisconnect() {
+    clearInterval(pollTimer); clearTimeout(dataTimer); live.speed = 0; ++cmdId;
+    $('btnConnect').disabled = false; $('btnConnect').textContent = 'Reconnect treadmill';
+    log('disconnected');
+    if (wantConnected) { setStatus('Connection lost. Trying again… Your walk is safe.', 'warn'); scheduleRetry(); }
+  }
+  function retry() { if (wantConnected && device && !device.gatt.connected) openGatt(); }
+
+  $('btnConnect').onclick = () => {
+    if (connecting) return;
+    if (device) { wantConnected = true; retryDelay = 2000; openGatt(); } else connect();
+  };
+  $('btnAll').onclick = () => connect('all');
+  $('btnName').onclick = () => connect('name');
+  $('btnFitshow').onclick = () => connect('fitshow');
   $('btnCopyLog').onclick = async () => {
     const text = `Walk Keeper log (${navigator.userAgent})\n` + $('log').textContent;
     try { await navigator.clipboard.writeText(text); alert('Log copied. Paste it in the chat.'); }
@@ -780,27 +844,69 @@ ${tp}
   }
   $('btnHr').onclick = connectHr;
 
-  // ---------- belt control: FTMS and FitShow commands side by side ----------
-  // Bluefy may not have the old writeValue(); use the newer calls first.
-  function bleWrite(ch, bytes, noResponse = false) {
-    const v = bytes instanceof Uint8Array ? bytes : new Uint8Array(bytes);
+  // ---------- belt control ----------
+  // Bluetooth can do only one write at a time. Two at once (a fast double tap)
+  // gives "operation already in progress" and the command is lost. So all
+  // writes wait in one line, and each one has a time limit.
+  let bleQueue = Promise.resolve();
+  function rawWrite(ch, v, noResponse) {
     if (noResponse && ch.writeValueWithoutResponse) return ch.writeValueWithoutResponse(v);
-    if (ch.writeValueWithResponse) return ch.writeValueWithResponse(v);
+    if (ch.writeValueWithResponse) return ch.writeValueWithResponse(v);   // Bluefy may not have writeValue()
     if (ch.writeValue) return ch.writeValue(v);
     return ch.writeValueWithoutResponse(v);
   }
+  function bleWrite(ch, bytes, noResponse = false) {
+    const v = bytes instanceof Uint8Array ? bytes : new Uint8Array(bytes);
+    const run = () => withTimeout(rawWrite(ch, v, noResponse), 4000, 'Bluetooth write');
+    const p = bleQueue.then(run, run);
+    bleQueue = p.catch(() => {});
+    return p;
+  }
   const hexOf = b => [...b].map(x => x.toString(16).padStart(2, '0')).join(' ');
 
-  // FTMS: ask for control again before every command, because some treadmills drop it.
-  async function ctrl(bytes) {
-    if (!ctrlChar) return false;
-    try {
-      await bleWrite(ctrlChar, [0x00]);
-      await bleWrite(ctrlChar, bytes);
-      log('FTMS sent ' + hexOf(bytes));
-      return true;
-    } catch (e) { log('FTMS failed: ' + errText(e)); return false; }
+  // FTMS answers every command with 80 <command> <result>.
+  const RESULT = { 0: 'no answer', 1: 'OK', 2: 'not supported', 3: 'bad value', 4: 'failed', 5: 'not allowed (no control)', '-1': 'write failed' };
+  let ftmsWait = null;
+  function onCtrlReply(dv) {
+    log('control reply ' + hex(dv));
+    if (dv.byteLength < 3 || dv.getUint8(0) !== 0x80) return;
+    const op = dv.getUint8(1), res = dv.getUint8(2);
+    if (ftmsWait && ftmsWait.op === op) { const w = ftmsWait; ftmsWait = null; w.resolve(res); }
   }
+  function waitReply(op, ms = 2000) {
+    return new Promise(resolve => {
+      const w = { op, resolve };
+      ftmsWait = w;
+      setTimeout(() => { if (ftmsWait === w) { ftmsWait = null; resolve(0); } }, ms);
+    });
+  }
+  async function ftmsSend(bytes) {
+    const w = waitReply(bytes[0]);
+    await bleWrite(ctrlChar, bytes);
+    return w;
+  }
+  // FTMS command. Asks for control first every time (some treadmills forget it).
+  // Gives back: 1 OK, 0 no answer, 2-5 refused, -1 write failed. bytes = null: only ask for control.
+  let ctrlBusy = Promise.resolve();
+  function ctrl(bytes) {
+    const job = async () => {
+      if (!ctrlChar) return -1;
+      try {
+        const c = await ftmsSend([0x00]);
+        if (c !== 1) log('FTMS control: ' + (RESULT[c] || c));
+        if (!bytes) return c;
+        let r = await ftmsSend(bytes);
+        if (r === 5) { await ftmsSend([0x00]); r = await ftmsSend(bytes); }   // lost control: one more try
+        log(`FTMS ${hexOf(bytes)}: ${RESULT[r] || r}`);
+        return r;
+      } catch (e) { log('FTMS failed: ' + errText(e)); return -1; }
+    };
+    const p = ctrlBusy.then(job, job);
+    ctrlBusy = p.catch(() => {});
+    return p;
+  }
+  const ftmsOk = r => r === 1 || r === 0;            // 0: no answer, but many pads do it anyway
+
   // FitShow: 0x53 = control. 01 = start, 02 = set speed (km/h x10) + incline, 03 = stop.
   async function fsCmd(bytes) {
     if (!writeChar) return false;
@@ -812,38 +918,149 @@ ${tp}
     } catch (e) { log('FitShow failed: ' + errText(e)); return false; }
   }
 
-  function setSpeed(v) {
-    v = Math.max(0.5, Math.min(20, Math.round(v * 10) / 10));
-    const n = Math.round(v * 100);
-    ctrl([0x02, n & 0xff, n >> 8]);
-    fsCmd([0x53, 0x02, Math.round(v * 10), Math.max(0, Math.round(live.incline || 0))]);
-    setStatus(`Speed set to ${v.toFixed(1)} km/h.`, 'ok');
+  // Every new command gets a number. A slow start or pause checks the number,
+  // so it stops at once when a newer command (like STOP) comes in.
+  let cmdId = 0, target = 0, paused = false;
+  const moving = () => Date.now() - live.at < 5000 && live.speed > 0.3;
+  function waitFor(id, test, ms) {
+    return new Promise(resolve => {
+      const t0 = Date.now();
+      const iv = setInterval(() => {
+        if (id !== cmdId) { clearInterval(iv); resolve(false); }
+        else if (test()) { clearInterval(iv); resolve(true); }
+        else if (Date.now() - t0 > ms) { clearInterval(iv); resolve(false); }
+      }, 200);
+    });
   }
-  $('btnFaster').onclick = () => setSpeed((live.speed > 0.3 ? live.speed : 0.5) + 0.5);
-  $('btnSlower').onclick = () => setSpeed(live.speed - 0.5);
+  const clampSpeed = v => Math.max(0.5, Math.min(20, Math.round(v * 10) / 10));
 
-  let lastCmd = null;                            // so a late start step never runs after STOP
-  $('btnStart').onclick = async () => {
-    lastCmd = 'start';
+  async function sendSpeed(v, id = cmdId) {
+    v = clampSpeed(v); target = v;
+    state.lastSpeed = v; save(); renderControls();
+    const n = Math.round(v * 100);
+    const r = await ctrl([0x02, n & 0xff, n >> 8]);
+    if (r !== 1 && writeChar && id === cmdId) await fsCmd([0x53, 0x02, Math.round(v * 10), Math.max(0, Math.round(live.incline || 0))]);
+    return v;
+  }
+
+  async function startBelt(speed) {
+    const id = ++cmdId;
+    paused = false; renderControls();
+    if (!ctrlChar && !writeChar) { setStatus('Connect the treadmill first.', 'warn'); return false; }
+    const want = clampSpeed(speed || 1.0);
     setStatus('Starting… stand clear of the belt.', 'warn');
-    const a = await ctrl([0x07]);
-    const b = await fsCmd([0x53, 0x01]);
-    if (!a && !b) setStatus('The app could not send START. See the technical log.', 'bad');
-    // If the belt is still not moving after the countdown, ask for a slow walking speed.
-    setTimeout(() => {
-      if (lastCmd === 'start' && live.speed < 0.3) { log('not moving yet, asking for 1.0 km/h'); setSpeed(1.0); }
-    }, 5000);
+
+    // 1. The normal way: FTMS start. FitShow start only when FTMS says no.
+    const r = await ctrl([0x07]);
+    if (id !== cmdId) return false;
+    if (!ftmsOk(r) && writeChar) await fsCmd([0x53, 0x01]);
+    if (await waitFor(id, moving, 6000)) return started(id, speed);
+    if (id !== cmdId) return false;
+
+    // 2. Some pads wait for a speed before the belt moves.
+    log('not moving yet, sending a speed');
+    setStatus('Still starting… sending a speed.', 'warn');
+    await sendSpeed(want, id);
+    if (await waitFor(id, moving, 5000)) return started(id, speed);
+    if (id !== cmdId) return false;
+
+    // 3. Try the other channel too, then the speed again.
+    log('still not moving, trying start on both channels');
+    if (writeChar) await fsCmd([0x53, 0x01]);
+    if (id !== cmdId) return false;
+    if (ctrlChar) await ctrl([0x07]);
+    if (await waitFor(id, moving, 4000)) return started(id, speed);
+    if (id !== cmdId) return false;
+    await sendSpeed(want, id);
+    if (await waitFor(id, moving, 5000)) return started(id, speed);
+    if (id !== cmdId) return false;
+
+    setStatus('The belt did not start. Check the safety key, then push Start again. If the belt moves but the numbers stay at 0, push Reconnect.', 'bad');
+    return false;
+  }
+  async function started(id, speed) {
+    if (speed && Math.abs(live.speed - speed) > 0.15 && id === cmdId) await sendSpeed(speed, id);
+    else target = live.speed;
+    if (id === cmdId) setStatus(`Walking${speed ? ` at ${clampSpeed(speed).toFixed(1)} km/h` : ''}.`, 'ok');
+    renderControls();
+    return true;
+  }
+
+  // Go straight to one speed. Starts the belt first if it is stopped.
+  async function goSpeed(v) {
+    if (moving()) {
+      ++cmdId; paused = false;
+      v = await sendSpeed(v);
+      setStatus(`Speed set to ${v.toFixed(1)} km/h.`, 'ok');
+    } else await startBelt(v);
+  }
+
+  // Pause: stop the belt but keep the walk. Resume: start again at the same speed.
+  // The time and distance never reset, because the app keeps its own totals.
+  async function pauseBelt() {
+    const id = ++cmdId;
+    state.pausedSpeed = moving() ? clampSpeed(live.speed) : (state.lastSpeed || 1.0);
+    paused = true; save(); renderControls();
+    setStatus('Pausing…', 'warn');
+    const r = await ctrl([0x08, 0x02]);                        // FTMS pause
+    if (id !== cmdId) return;
+    if (!ftmsOk(r) && writeChar) await fsCmd([0x53, 0x03]);
+    if (!(await waitFor(id, () => !moving(), 3000)) && id === cmdId) {
+      log('still moving after pause, sending stop');
+      await ctrl([0x08, 0x01]);
+      if (writeChar) await fsCmd([0x53, 0x03]);
+    }
+    if (id === cmdId) setStatus(`Paused. Your time and distance are kept. Push Resume to go on at ${state.pausedSpeed.toFixed(1)} km/h.`, 'ok');
+  }
+
+  function renderControls() {
+    const b = $('btnPause');
+    b.textContent = paused ? `▶ Resume ${(state.pausedSpeed || 1).toFixed(1)}` : '❚❚ Pause';
+    b.classList.toggle('paused', paused);
+    const presets = state.presets || [2, 3, 4, 5, 6];
+    const now = moving() ? live.speed : -1;
+    $('presets').innerHTML = presets.map(v =>
+      `<button data-speed="${v}" class="${Math.abs(now - v) < 0.15 ? 'on' : ''}">${v.toFixed(1)}<br><small>km/h</small></button>`).join('');
+  }
+
+  $('presets').onclick = e => {
+    const btn = e.target.closest('button');
+    if (btn && btn.dataset.speed) goSpeed(parseFloat(btn.dataset.speed));
+  };
+  $('btnPresetEdit').onclick = () => {
+    const now = (state.presets || [2, 3, 4, 5, 6]).join(', ');
+    const t = prompt('Type up to 6 speeds in km/h, with commas between them.', now);
+    if (t == null) return;
+    const list = t.split(/[,; ]+/).map(x => parseFloat(x.replace(',', '.'))).filter(v => v >= 0.5 && v <= 20)
+      .slice(0, 6).map(clampSpeed);
+    if (!list.length) { alert('No good speeds found. Example: 2, 3, 4.5, 6'); return; }
+    state.presets = list; save(); renderControls();
   };
 
+  $('btnFaster').onclick = () => goSpeed((moving() ? (target || live.speed) : 0.5) + 0.5);
+  $('btnSlower').onclick = () => { if (moving()) goSpeed((target || live.speed) - 0.5); };
+  $('btnStart').onclick = () => startBelt(paused ? state.pausedSpeed : 0);
+  $('btnPause').onclick = () => (paused ? startBelt(state.pausedSpeed) : pauseBelt());
+
   $('btnStop').onclick = async () => {
-    lastCmd = 'stop';
+    const id = ++cmdId;
+    paused = false; renderControls();
     setStatus('Stopping…', 'warn');
-    const a = await ctrl([0x08, 0x01]);
-    const b = await fsCmd([0x53, 0x03]);
-    setTimeout(async () => {
-      if (live.speed > 0.3) { log('still moving, trying pause'); await ctrl([0x08, 0x02]); }
-    }, 2000);
-    if (!a && !b) setStatus('The app could not send STOP. Use the treadmill\'s own stop button or safety key.', 'bad');
+    // Send both ways at once, and do not wait for other commands or answers:
+    // stopping is the one thing that must work.
+    const a = ctrlChar ? Promise.all([bleWrite(ctrlChar, [0x00]), bleWrite(ctrlChar, [0x08, 0x01])])
+      .then(() => { log('FTMS stop sent'); return true; }, e => { log('FTMS stop failed: ' + errText(e)); return false; })
+      : Promise.resolve(false);
+    const [okA, b] = await Promise.all([a, fsCmd([0x53, 0x03])]);
+    if (!okA && !b) {
+      setStatus('The app could not send STOP. Use the treadmill\'s own stop button or safety key.', 'bad');
+      return;
+    }
+    if (!(await waitFor(id, () => !moving(), 2500)) && id === cmdId) {
+      log('still moving, trying pause');
+      await ctrl([0x08, 0x02]);
+    }
+    if (id === cmdId) setStatus(moving() ? 'The belt may still move. Use the treadmill\'s own stop button.' : 'Stopped. Push Finish walk to save, or Start to go on.', moving() ? 'bad' : 'ok');
   };
 
   // ---------- keep the screen on ----------
@@ -854,19 +1071,32 @@ ${tp}
   document.addEventListener('visibilitychange', () => { if (document.visibilityState === 'visible' && device) keepAwake(); });
 
   // ---------- demo mode for testing: add ?demo to the address ----------
+  // A fake treadmill that obeys Start, Pause, Stop and speed, like FTMS does.
+  // ?demo&slow = the belt starts only after it gets a speed (like some pads).
   if (location.search.includes('demo')) {
+    const needSpeed = location.search.includes('slow');
+    const belt = { on: false, speed: 0, set: 2.5, d: 0, armed: false };
+    const reply = (op, res) => setTimeout(() => onCtrlReply(new DataView(new Uint8Array([0x80, op, res]).buffer)), 60);
+    ctrlChar = {
+      writeValueWithResponse: async v => {
+        const op = v[0];
+        if (op === 0x07) { belt.armed = true; if (!needSpeed) setTimeout(() => { if (belt.armed) { belt.on = true; belt.speed = belt.set; } }, 1500); }
+        if (op === 0x02) { belt.set = (v[1] | v[2] << 8) / 100; if (belt.on) belt.speed = belt.set; else if (belt.armed) { belt.on = true; belt.speed = belt.set; } }
+        if (op === 0x08) { belt.on = false; belt.armed = false; belt.speed = 0; if (v[1] === 0x01) belt.d = 0; }  // stop forgets distance, pause keeps it
+        reply(op, 1);
+      },
+    };
+    mode = 'demo';
+    $('controls').style.display = 'block';
     setStatus('Demo mode (fake treadmill and heart rate).', 'ok');
-    let t = 0, d = 0;
     setInterval(() => {
-      t++;
-      const running = t % 40 < 25;                 // walk 25 s, stop 15 s, repeat
-      if (!running && t % 40 === 25) d = 0;        // treadmill forgets its distance
-      if (running) d += 50;
-      emit({ speed: running ? 4.5 : 0, dist: d, steps: Math.round(d / 0.7), incline: 2 });
-      onHr(running ? 115 : 95);
+      if (belt.on) belt.d += belt.speed / 3.6;
+      emit({ speed: belt.speed, dist: Math.round(belt.d), steps: Math.round(belt.d / 0.7), incline: 0 });
+      onHr(belt.on ? 115 : 95);
     }, 1000);
-  }
+  } else connectRemembered();
 
+  renderControls();
   save(); showTab(['Walk', 'Family', 'Stats'].includes(tab) ? tab : 'Walk');
 })();
 </script>
