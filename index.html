@@ -89,6 +89,13 @@
   #goalBox { margin-top: 10px; }
   #cloud { font-size: 13px; color: var(--muted); margin-top: 8px; display: flex; justify-content: space-between; align-items: center; gap: 8px; }
   #cloud.ok b { color: var(--accent); } #cloud.warn b { color: var(--warn); }
+  .goalcard { background: var(--card); border-radius: 14px; padding: 14px; margin-top: 10px; }
+  .goalcard .gtop { display: flex; justify-content: space-between; align-items: center; gap: 8px; font-weight: 700; }
+  .goalcard .gline { color: var(--muted); font-size: 14px; margin-top: 8px; font-variant-numeric: tabular-nums; }
+  .goalcard .gneed { display: flex; justify-content: space-between; align-items: center; gap: 8px; margin-top: 8px;
+                     font-size: 14px; font-variant-numeric: tabular-nums; }
+  .goalcard .gneed:empty { display: none; }
+  .livecard .goal { color: var(--text); font-size: 13px; margin-top: 8px; font-variant-numeric: tabular-nums; }
   .livecard { background: #14281f; border: 2px solid var(--accent); border-radius: 14px; padding: 14px; margin-bottom: 12px; }
   .livecard .lt { font-weight: 700; display: flex; justify-content: space-between; gap: 8px; align-items: baseline; }
   .livecard .lt small { color: var(--muted); font-weight: 400; }
@@ -133,6 +140,13 @@
     <div class="tile"><div class="label">Heart rate</div><div class="val"><span id="hr">–</span><span class="unit">bpm</span></div></div>
     <div class="tile"><div class="label">Steps</div><div class="val" id="steps">–</div></div>
     <div class="tile"><div class="label">Incline</div><div class="val"><span id="incline">0</span><span class="unit">%</span></div></div>
+  </div>
+
+  <div class="goalcard" id="goalCard">
+    <div class="gtop"><span id="gTop">No goal for this walk.</span><button class="small" id="btnGoal">Set goal</button></div>
+    <div id="gBar"></div>
+    <div class="gline" id="gEta"></div>
+    <div class="gneed"><span id="gNeed"></span><button class="small primary" id="btnGoalGo" hidden>Go</button></div>
   </div>
 
   <div class="row">
@@ -226,6 +240,20 @@
       <button id="fCancel">Cancel</button>
     </div>
     <div class="row"><button class="danger" id="fDelete">Delete this person</button></div>
+  </div>
+</div>
+
+<div id="goalSheet" class="sheet">
+  <div class="panel">
+    <h1>Goal for this walk</h1>
+    <label for="gKm">Distance (km)</label><input id="gKm" type="number" inputmode="decimal" min="0.1" max="100" step="0.1">
+    <label for="gAvg">Target average speed (km/h), you can leave it empty</label><input id="gAvg" type="number" inputmode="decimal" min="0.5" max="20" step="0.1">
+    <div class="note" id="gAvgNote">The average counts only the time the belt moves. Pauses do not count.</div>
+    <div class="row">
+      <button class="primary" id="gSave">Save</button>
+      <button id="gCancel">Cancel</button>
+    </div>
+    <div class="row"><button class="danger" id="gClear">No goal</button></div>
   </div>
 </div>
 
@@ -358,7 +386,7 @@
       announce();
       save();
     }
-    render(); renderProfiles(); renderControls();
+    render(); renderProfiles(); renderControls(); renderGoal();
     if (tab === 'Family') renderFamily();
     if (tab === 'Stats') renderStats();
   }, 1000);
@@ -478,6 +506,83 @@
   $('voice').onchange = e => {
     state.voice = e.target.checked; save();
     if (state.voice) say('Voice is on.');          // iPhone needs a tap before it may speak
+  };
+
+  // ---------- goal for this walk ----------
+  // Distance goal, and a target average speed (you may leave it empty).
+  // The average counts moving time only, like the "Walking time" tile.
+  function goalInfo(distM, timeS, speed, g) {
+    if (!g || !(g.km > 0)) return null;
+    const left = Math.max(0, g.km * 1000 - distM) / 1000;
+    const r = { km: g.km, avg: g.avg || 0, left, done: left <= 0.0005, frac: Math.min(1, distM / (g.km * 1000)) };
+    if (!r.done && speed > 0.3) r.eta = left / speed * 3600;
+    if (r.avg > 0 && !r.done) {
+      const remT = g.km / r.avg * 3600 - timeS;           // seconds left for that average
+      r.need = remT > 0 ? left / (remT / 3600) : Infinity;
+    }
+    return r;
+  }
+  const clock = s => new Date(Date.now() + s * 1000).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+  const paceOf = kmh => fmtTime(3600 / kmh);
+  // Short text for the live card on other devices.
+  function goalShort(gi, speed) {
+    if (!gi) return '';
+    if (gi.done) return `🎉 Goal ${gi.km} km reached!`;
+    let t = `Goal ${gi.km} km: ${gi.left.toFixed(2)} km left`;
+    if (gi.eta) t += ` · ${fmtTime(gi.eta)} more at ${speed.toFixed(1)}`;
+    if (gi.avg) t += gi.need <= 20 ? ` · walk ${gi.need.toFixed(1)} km/h for avg ${gi.avg}` : ` · avg ${gi.avg} not possible now`;
+    return t;
+  }
+  let goalNeed = 0;
+  function renderGoal() {
+    const w = state.walk, g = state.walkGoal;
+    const speed = moving() ? live.speed : 0;
+    const gi = goalInfo(total(w.counters.dist), w.time, speed, g);
+    const put = (id, v) => { if ($(id).textContent !== v) $(id).textContent = v; };
+    $('btnGoal').textContent = gi ? 'Change' : 'Set goal';
+    const go = $('btnGoalGo');
+    if (!gi) {
+      put('gTop', 'No goal for this walk.'); put('gEta', 'Set a distance, and the app shows how long it takes at your speed.');
+      put('gNeed', ''); $('gBar').innerHTML = ''; go.hidden = true; return;
+    }
+    const barHtml = bar(gi.frac);
+    if ($('gBar').innerHTML !== barHtml) $('gBar').innerHTML = barHtml;
+    if (gi.done) {
+      put('gTop', `🎉 Goal reached: ${gi.km} km!`); put('gEta', 'Well done. Push "Finish walk" to save it.');
+      put('gNeed', ''); go.hidden = true; return;
+    }
+    put('gTop', `Goal ${gi.km} km · ${gi.left.toFixed(2)} km left`);
+    put('gEta', gi.eta ? `At ${speed.toFixed(1)} km/h: ${fmtTime(gi.eta)} more · done at ${clock(gi.eta)}`
+                       : 'Start walking to see the time left.');
+    if (!gi.avg) { put('gNeed', ''); go.hidden = true; return; }
+    if (gi.need <= 20) {
+      goalNeed = Math.max(0.5, Math.round(gi.need * 10) / 10);
+      const ahead = gi.need < 0.5;
+      put('gNeed', ahead ? `You are ahead of your average of ${gi.avg} km/h. Any speed works.`
+        : `For an average of ${gi.avg} km/h (${paceOf(gi.avg)} /km): walk ${gi.need.toFixed(1)} km/h for the rest.`);
+      go.hidden = ahead || !(ctrlChar || writeChar) || Math.abs(speed - goalNeed) < 0.15;
+      if (!go.hidden) go.textContent = `Go ${goalNeed.toFixed(1)}`;
+    } else {
+      put('gNeed', `An average of ${gi.avg} km/h is not possible now. Walk as fast as is safe.`);
+      go.hidden = true;
+    }
+  }
+  $('btnGoalGo').onclick = () => { if (goalNeed) goSpeed(goalNeed); };
+  $('btnGoal').onclick = () => {
+    const g = state.walkGoal || {};
+    $('gKm').value = g.km || 10; $('gAvg').value = g.avg || '';
+    $('goalSheet').classList.add('open');
+  };
+  $('gCancel').onclick = () => $('goalSheet').classList.remove('open');
+  $('gClear').onclick = () => { state.walkGoal = null; save(); $('goalSheet').classList.remove('open'); renderGoal(); };
+  $('gSave').onclick = () => {
+    const km = parseFloat(String($('gKm').value).replace(',', '.'));
+    const avgT = String($('gAvg').value).trim().replace(',', '.');
+    const avg = avgT ? parseFloat(avgT) : 0;
+    if (!(km > 0 && km <= 100)) { alert('Type a distance between 0.1 and 100 km.'); return; }
+    if (avgT && !(avg >= 0.5 && avg <= 20)) { alert('Type an average speed between 0.5 and 20 km/h, or leave it empty.'); return; }
+    state.walkGoal = { km: Math.round(km * 100) / 100, avg: Math.round(avg * 10) / 10 };
+    save(); $('goalSheet').classList.remove('open'); renderGoal();
   };
 
   // ---------- tabs ----------
@@ -1266,6 +1371,7 @@ ${tp}
           time: Math.round(w.time), dist: Math.round(total(w.counters.dist)), kcal: Math.round(w.kcal),
           speed: moving() ? Math.round(live.speed * 10) / 10 : 0, hr: hrFresh() ? live.hr : 0,
           paused, pausedSpeed: state.pausedSpeed || 0, connected: true,
+          goalKm: (state.walkGoal && state.walkGoal.km) || 0, goalAvg: (state.walkGoal && state.walkGoal.avg) || 0,
         });
         for (const c of r.cmds || []) runRemote(c);
       } else if (wasHost) {
@@ -1309,6 +1415,7 @@ ${tp}
             <div><b data-f="kcal"></b><span>kcal</span></div>
             <div><b data-f="speed"></b><span>km/h</span></div>
           </div>
+          <div class="goal" data-f="goal"></div>
           <div class="row"><button class="stop" data-cmd="stop">■ STOP</button></div>
           <div class="row">
             ${w.paused ? `<button class="primary" data-cmd="resume">▶ Resume</button>` : `<button data-cmd="pause">❚❚ Pause</button>`}
@@ -1326,6 +1433,7 @@ ${tp}
       set('kcal', String(w.kcal));
       set('speed', w.paused ? 'pause' : (+w.speed).toFixed(1));
       set('msg', liveMsg[w.deviceId] || (w.hr ? `Heart rate ${w.hr} bpm` : ''));
+      set('goal', goalShort(goalInfo(w.dist, w.time, w.paused ? 0 : +w.speed, { km: w.goalKm, avg: w.goalAvg }), +w.speed));
     }
   }
   $('livePanel').onclick = async e => {
@@ -1380,7 +1488,7 @@ ${tp}
     }, 1000);
   } else connectRemembered();
 
-  renderControls(); renderCloud(); sync();
+  renderControls(); renderCloud(); renderGoal(); sync();
   save(); showTab(['Walk', 'Family', 'Stats'].includes(tab) ? tab : 'Walk');
 })();
 </script>

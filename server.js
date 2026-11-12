@@ -104,7 +104,7 @@ function merge(cur, inc) {
 // Live walks: kept in memory only (a restart just shows them again 1 s later).
 const live = new Map();                 // deviceId -> { profileId, name, device, time, dist, kcal, speed, hr, paused, connected, at, cmds }
 const LIVE_TTL = 15000;
-const LIVE_FIELDS = ['profileId', 'name', 'device', 'time', 'dist', 'kcal', 'speed', 'hr', 'paused', 'connected', 'pausedSpeed'];
+const LIVE_FIELDS = ['profileId', 'name', 'device', 'time', 'dist', 'kcal', 'speed', 'hr', 'paused', 'connected', 'pausedSpeed', 'goalKm', 'goalAvg'];
 
 // ---------- login ----------
 function checkPassword(pw) {
