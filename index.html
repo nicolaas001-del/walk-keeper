@@ -150,6 +150,9 @@
   <div class="row">
     <button class="danger" id="btnFinish">Finish walk &amp; save</button>
   </div>
+  <div class="row">
+    <button class="small" id="btnFixDist" style="flex:1">Correct the distance</button>
+  </div>
   <div class="note">Pause, stop and start the treadmill as much as you like. The time and distance keep adding up until you push "Finish walk".</div>
   <label class="toggle"><span>Speak every kilometre</span><input type="checkbox" id="voice"></label>
   </section>
@@ -271,11 +274,24 @@
   const profile = () => state.profiles.find(p => p.id === state.active) || state.profiles[0];
   function save() { try { localStorage.setItem(KEY, JSON.stringify(state)); } catch (e) {} }
 
-  // A treadmill counter (distance, steps) goes back to 0 when the belt stops.
+  // A treadmill counter (distance, steps) can go back to 0 when the belt stops.
   // When it drops, bank what we had and start a new segment.
+  // But some pads show 0 only while paused, and then go on from the old number
+  // when the belt starts again. Then the bank must be taken back, or the
+  // distance counts twice. A real walk never adds 30+ in one reading
+  // (20 km/h = 6 m per second), so a big jump back near the old number = "not a reset".
   function feedCounter(c, v) {
     if (v == null || !isFinite(v)) return;
-    if (v + 0.5 < c.seg) { c.bank += c.seg; log(`counter reset seen, banked ${c.seg}`); }
+    if (v + 0.5 < c.seg) {
+      c.bank += c.seg; c.held = c.seg;
+      log(`counter drop seen, banked ${c.seg}`);
+    } else if (c.held && v - c.seg > 30 && v >= c.held * 0.9 - 30) {
+      c.bank -= c.held;
+      log(`counter went on from ${v} (old ${c.held}): not a reset, bank taken back`);
+      c.held = 0;
+    } else if (c.held && v - c.seg > 30) {
+      c.held = 0;                               // a jump that does not match: leave the totals
+    }
     c.seg = v;
   }
   const total = c => c.bank + c.seg;
@@ -379,8 +395,13 @@
   const bar = frac => `<div class="bar"><div style="width:${Math.min(100, frac * 100).toFixed(1)}%"></div></div>`;
 
   function renderProfiles() {
-    $('profileSel').innerHTML = state.profiles.map(p =>
+    // Build the list only when it changed. Building it every second closed the
+    // list while you were picking a person.
+    const opts = state.profiles.map(p =>
       `<option value="${p.id}"${p.id === state.active ? ' selected' : ''}>${esc(p.name)} · ${p.kg} kg</option>`).join('');
+    const sel = $('profileSel');
+    if (sel.dataset.built !== opts) { sel.innerHTML = opts; sel.dataset.built = opts; }
+    if (document.activeElement !== sel && sel.value !== state.active) sel.value = state.active;
     const p = profile(), h = p.history, wk = weekMetres(p) / 1000, s = streak(p);
     $('goalBox').innerHTML = `<div class="meta" style="display:flex;justify-content:space-between;color:var(--muted);font-size:13px">
       <span>This week: <b style="color:var(--text)">${wk.toFixed(1)}</b> / ${goalOf(p)} km${wk >= goalOf(p) ? ' 🎉' : ''}</span>
@@ -521,18 +542,46 @@
     if (state.active === p.id) state.active = state.profiles[0].id;
     save(); closeSheet(); renderAll(); sync();
   };
+  // A walk that is going on belongs to the person picked at the top. It is
+  // added to that person only on "Finish walk". So on a change of person:
+  // save it for the old person first, or let it go with the new person.
   $('profileSel').onchange = e => {
+    const to = state.profiles.find(p => p.id === e.target.value), from = profile();
+    if (!to) return;
     if (walkHasData()) {
-      alert('Finish and save the current walk first. Then change the person.');
-      e.target.value = state.active; return;
+      const km = (total(state.walk.counters.dist) / 1000).toFixed(2);
+      if (confirm(`Change to ${to.name}?\n\nOK = save the walk now going on (${km} km) for ${from.name} first.\nCancel = more choices.`)) {
+        finishWalk(from);
+      } else if (!confirm(`Give this walk (${km} km) to ${to.name} in place of ${from.name}?\n\nOK = yes, it is ${to.name}'s walk.\nCancel = do not change the person.`)) {
+        e.target.value = state.active; return;
+      }
     }
-    state.active = e.target.value; save(); renderAll();
+    state.active = to.id; save(); renderAll();
   };
 
   $('btnFinish').onclick = () => {
     const w = state.walk, p = profile();
     if (!walkHasData()) { alert('Nothing to save yet.'); return; }
     if (!confirm(`Save this walk for ${p.name}?\n${(total(w.counters.dist) / 1000).toFixed(2)} km in ${fmtTime(w.time)}, ${Math.round(w.kcal)} kcal\n\nThe counters then go back to zero.`)) return;
+    finishWalk(p);
+  };
+  // Set the distance of the walk now going on by hand (for example after a counting error).
+  // Time and calories do not change: the app counts them from time and speed.
+  $('btnFixDist').onclick = () => {
+    const c = state.walk.counters, now = total(c.dist) / 1000;
+    const t = prompt(`The distance now is ${now.toFixed(2)} km.\nType the correct distance in km:`, now.toFixed(2));
+    if (t == null) return;
+    const km = parseFloat(t.replace(',', '.'));
+    if (!(km >= 0 && km < 200)) { alert('Type a number, for example 1.5'); return; }
+    const want = km * 1000, ratio = total(c.dist) > 0 ? want / total(c.dist) : 1;
+    c.dist.bank = want - c.dist.seg; c.dist.held = 0;
+    if (total(c.steps) > 0) { c.steps.bank = Math.round(total(c.steps) * ratio) - c.steps.seg; c.steps.held = 0; }
+    state.walk.spokenKm = Math.floor(km);
+    log(`distance set by hand: ${now.toFixed(2)} -> ${km.toFixed(2)} km`);
+    save(); render();
+  };
+  function finishWalk(p) {
+    const w = state.walk;
     p.history.push({ date: w.startedAt || Date.now(), time: Math.round(w.time), dist: Math.round(total(w.counters.dist)),
                      steps: Math.round(total(w.counters.steps)), kcal: Math.round(w.kcal), samples: w.samples });
     p.history.slice(0, -KEEP_SAMPLES).forEach(x => delete x.samples);
@@ -541,7 +590,7 @@
     for (const k in state.walk.counters) state.walk.counters[k].bank = -lastRaw[k];
     delete p.auto; changed();
     save(); renderAll(); sync();
-  };
+  }
 
   // ---------- Garmin file (TCX) ----------
   function toTcx(x, p) {
@@ -1187,6 +1236,7 @@ ${tp}
   // ?demo&slow = the belt starts only after it gets a speed (like some pads).
   if (location.search.includes('demo')) {
     const needSpeed = location.search.includes('slow');
+    const zeroMode = location.search.includes('zero');
     const belt = { on: false, speed: 0, set: 2.5, d: 0, armed: false };
     const reply = (op, res) => setTimeout(() => onCtrlReply(new DataView(new Uint8Array([0x80, op, res]).buffer)), 60);
     ctrlChar = {
@@ -1203,7 +1253,9 @@ ${tp}
     setStatus('Demo mode (fake treadmill and heart rate).', 'ok');
     setInterval(() => {
       if (belt.on) belt.d += belt.speed / 3.6;
-      emit({ speed: belt.speed, dist: Math.round(belt.d), steps: Math.round(belt.d / 0.7), incline: 0 });
+      // ?demo&zero = like the real pad: shows 0 while stopped, then goes on from the old number
+      const shown = zeroMode && !belt.on ? 0 : belt.d;
+      emit({ speed: belt.speed, dist: Math.round(shown), steps: Math.round(shown / 0.7), incline: 0 });
       onHr(belt.on ? 115 : 95);
     }, 1000);
   } else connectRemembered();
