@@ -64,6 +64,21 @@ try {
     const r = await fetch(B + '/api/sync', { method: 'OPTIONS', headers: { Origin: 'https://evil.example' } });
     assert.equal(r.headers.get('access-control-allow-origin'), null);
   });
+  await t('live: other devices see the walk, commands reach the host once', async () => {
+    await post('/api/live', { deviceId: 'pc', profileId: 'nic', name: 'Nicolaas', device: 'computer', dist: 1500, time: 900, kcal: 100, speed: 5, paused: false }, tok);
+    const seen = await (await fetch(B + '/api/live', { headers: { Authorization: 'Bearer ' + tok } })).json();
+    assert.equal(seen.walks.length, 1); assert.equal(seen.walks[0].dist, 1500); assert.ok(!seen.walks[0].cmds);
+    assert.equal((await post('/api/live/cmd', { deviceId: 'pc', cmd: 'speed', value: 6, from: 'iPhone' }, tok)).status, 200);
+    assert.equal((await post('/api/live/cmd', { deviceId: 'pc', cmd: 'stop', from: 'iPhone' }, tok)).status, 200);
+    const r1 = await (await post('/api/live', { deviceId: 'pc', profileId: 'nic', name: 'Nicolaas', dist: 1505 }, tok)).json();
+    assert.deepEqual(r1.cmds.map(c => c.cmd), ['stop']);          // STOP clears the waiting speed
+    const r2 = await (await post('/api/live', { deviceId: 'pc', profileId: 'nic', name: 'Nicolaas', dist: 1510 }, tok)).json();
+    assert.equal(r2.cmds.length, 0);                                 // given only once
+  });
+  await t('live: bad command and no token are refused', async () => {
+    assert.equal((await post('/api/live/cmd', { deviceId: 'pc', cmd: 'explode' }, tok)).status, 400);
+    assert.equal((await post('/api/live', { deviceId: 'pc' })).status, 401);
+  });
   await t('password guessing is slowed down', async () => {
     let last; for (let i = 0; i < 12; i++) last = (await post('/api/login', { password: 'x' + i })).status;
     assert.equal(last, 429);

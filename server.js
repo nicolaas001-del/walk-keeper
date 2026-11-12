@@ -101,6 +101,11 @@ function merge(cur, inc) {
   return { profiles, deleted: [...deleted].slice(-500), rev: cur.rev || 0 };
 }
 
+// Live walks: kept in memory only (a restart just shows them again 1 s later).
+const live = new Map();                 // deviceId -> { profileId, name, device, time, dist, kcal, speed, hr, paused, connected, at, cmds }
+const LIVE_TTL = 15000;
+const LIVE_FIELDS = ['profileId', 'name', 'device', 'time', 'dist', 'kcal', 'speed', 'hr', 'paused', 'connected', 'pausedSpeed'];
+
 // ---------- login ----------
 function checkPassword(pw) {
   const [salt, hash] = PASS_HASH.split(':');
@@ -171,6 +176,40 @@ const server = http.createServer(async (req, res) => {
         const next = merge(data, body);
         if (JSON.stringify([next.profiles, next.deleted]) !== before) { data = next; store(); }
         return send(res, 200, data, undefined, cors);
+      }
+    }
+
+    // ---------- live walks ----------
+    // The device that is connected to the treadmill (the "host") sends its numbers
+    // every second, and gets back the commands other devices sent for it.
+    // Other devices read the live walks, and can send STOP, pause, resume or a speed.
+    if (url.pathname.startsWith('/api/live')) {
+      if (!tokenOk(req)) return send(res, 401, { error: 'Please log in again.' }, undefined, cors);
+      const now = Date.now();
+      for (const [k, v] of live) if (now - v.at > LIVE_TTL) live.delete(k);
+      if (url.pathname === '/api/live' && req.method === 'GET') {
+        return send(res, 200, { now, walks: [...live.values()].map(({ cmds, ...w }) => w) }, undefined, cors);
+      }
+      if (url.pathname === '/api/live' && req.method === 'POST') {
+        const b = await readBody(req);
+        if (typeof b.deviceId !== 'string' || !b.deviceId || b.deviceId.length > 60) return send(res, 400, { error: 'deviceId' }, undefined, cors);
+        const old = live.get(b.deviceId);
+        if (b.end) { live.delete(b.deviceId); return send(res, 200, { cmds: [] }, undefined, cors); }
+        const w = { deviceId: b.deviceId, at: now, cmds: [] };
+        for (const k of LIVE_FIELDS) w[k] = typeof b[k] === 'number' || typeof b[k] === 'boolean' ? b[k] : String(b[k] ?? '').slice(0, 40);
+        const cmds = old ? old.cmds : [];
+        live.set(b.deviceId, w);
+        return send(res, 200, { cmds }, undefined, cors);
+      }
+      if (url.pathname === '/api/live/cmd' && req.method === 'POST') {
+        const b = await readBody(req);
+        const w = live.get(b.deviceId);
+        if (!w) return send(res, 404, { error: 'This walk is not live any more.' }, undefined, cors);
+        if (!['stop', 'pause', 'resume', 'speed'].includes(b.cmd)) return send(res, 400, { error: 'cmd' }, undefined, cors);
+        if (b.cmd === 'stop') w.cmds = [];                 // STOP wins over anything still waiting
+        w.cmds.push({ id: crypto.randomUUID(), cmd: b.cmd, value: +b.value || 0, from: String(b.from || '').slice(0, 20), at: now });
+        w.cmds = w.cmds.slice(-5);
+        return send(res, 200, { ok: true }, undefined, cors);
       }
     }
 

@@ -89,6 +89,17 @@
   #goalBox { margin-top: 10px; }
   #cloud { font-size: 13px; color: var(--muted); margin-top: 8px; display: flex; justify-content: space-between; align-items: center; gap: 8px; }
   #cloud.ok b { color: var(--accent); } #cloud.warn b { color: var(--warn); }
+  .livecard { background: #14281f; border: 2px solid var(--accent); border-radius: 14px; padding: 14px; margin-bottom: 12px; }
+  .livecard .lt { font-weight: 700; display: flex; justify-content: space-between; gap: 8px; align-items: baseline; }
+  .livecard .lt small { color: var(--muted); font-weight: 400; }
+  .livecard .dot { display: inline-block; width: 10px; height: 10px; border-radius: 50%; background: var(--bad); margin-right: 6px; animation: blink 1.2s infinite; }
+  @keyframes blink { 50% { opacity: .25; } }
+  .livecard .nums { display: grid; grid-template-columns: repeat(4, 1fr); gap: 6px; margin-top: 10px; text-align: center; }
+  .livecard .nums b { display: block; font-size: 22px; font-variant-numeric: tabular-nums; }
+  .livecard .nums span { color: var(--muted); font-size: 11px; text-transform: uppercase; }
+  .livecard .row { margin-top: 10px; }
+  .livecard .sp button { padding: 10px 2px; font-size: 15px; }
+  .livecard .msg { color: var(--muted); font-size: 13px; margin-top: 8px; min-height: 18px; }
   #loginErr { color: var(--bad); font-size: 14px; min-height: 20px; margin-top: 8px; }
 </style>
 </head>
@@ -111,6 +122,7 @@
   </div>
 
   <section id="tabWalk" class="on">
+  <div id="livePanel"></div>
 
   <div class="grid">
     <div class="tile big"><div class="label">Walking time</div><div class="val" id="time">0:00</div></div>
@@ -1203,7 +1215,7 @@ ${tp}
   $('btnStart').onclick = () => startBelt(paused ? state.pausedSpeed : 0);
   $('btnPause').onclick = () => (paused ? startBelt(state.pausedSpeed) : pauseBelt());
 
-  $('btnStop').onclick = async () => {
+  async function stopBelt() {
     const id = ++cmdId;
     paused = false; renderControls();
     setStatus('Stopping…', 'warn');
@@ -1222,6 +1234,114 @@ ${tp}
       await ctrl([0x08, 0x02]);
     }
     if (id === cmdId) setStatus(moving() ? 'The belt may still move. Use the treadmill\'s own stop button.' : 'Stopped. Push Finish walk to save, or Start to go on.', moving() ? 'bad' : 'ok');
+  }
+  $('btnStop').onclick = stopBelt;
+
+  // ---------- live walk on other devices ----------
+  // The device that is connected to the treadmill sends its numbers to the
+  // family server every second. Every other logged-in device shows that walk
+  // live, and can send STOP, pause, resume or a speed. The connected device
+  // gets the command on its next send (about 1 second) and sends it to the belt.
+  let deviceId = null;
+  try { deviceId = localStorage.getItem('walkkeeper.deviceId'); } catch (e) {}
+  if (!deviceId) {
+    deviceId = Math.random().toString(36).slice(2, 10) + Date.now().toString(36);
+    try { localStorage.setItem('walkkeeper.deviceId', deviceId); } catch (e) {}
+  }
+  const ua = navigator.userAgent;
+  const deviceName = /iPhone/.test(ua) ? 'iPhone' : /iPad/.test(ua) ? 'iPad' : /Android/.test(ua) ? 'phone' : 'computer';
+  const demoHost = location.search.includes('demo') && location.search.includes('host');   // test: the fake belt acts as the connected device
+  const isHost = () => demoHost || !!(device && device.gatt.connected && (ctrlChar || writeChar));
+  let liveBusy = false, wasHost = false, liveWalks = [], liveKey = '', liveMsg = {};
+
+  async function liveTick() {
+    if (!state.token || !canSync || (location.search.includes('demo') && !demoHost) || liveBusy) return;
+    liveBusy = true;
+    try {
+      if (isHost()) {
+        wasHost = true;
+        const w = state.walk, p = profile();
+        const r = await api('/api/live', {
+          deviceId, profileId: p.id, name: p.name, device: deviceName,
+          time: Math.round(w.time), dist: Math.round(total(w.counters.dist)), kcal: Math.round(w.kcal),
+          speed: moving() ? Math.round(live.speed * 10) / 10 : 0, hr: hrFresh() ? live.hr : 0,
+          paused, pausedSpeed: state.pausedSpeed || 0, connected: true,
+        });
+        for (const c of r.cmds || []) runRemote(c);
+      } else if (wasHost) {
+        wasHost = false;
+        await api('/api/live', { deviceId, end: true });
+      }
+      if (document.visibilityState === 'visible') {
+        const d = await api('/api/live');
+        liveWalks = (d.walks || []).filter(x => x.deviceId !== deviceId);
+        renderLive();
+      }
+    } catch (e) { /* no internet for a moment: the next tick tries again */ }
+    finally { liveBusy = false; }
+  }
+  setInterval(liveTick, 1000);
+
+  function runRemote(c) {
+    log(`command from ${c.from || 'other device'}: ${c.cmd} ${c.value || ''}`);
+    const who = c.from ? ` (from the ${c.from})` : '';
+    if (c.cmd === 'stop') { stopBelt(); setStatus('Stopping' + who + '…', 'warn'); }
+    else if (c.cmd === 'pause') { if (!paused) pauseBelt(); }
+    else if (c.cmd === 'resume') startBelt(state.pausedSpeed || c.value || 1);
+    else if (c.cmd === 'speed' && c.value > 0) goSpeed(c.value);
+  }
+
+  // Build the cards only when the walks change; else only update the numbers,
+  // so the buttons stay steady under the finger.
+  function renderLive() {
+    const box = $('livePanel');
+    const list = liveWalks.slice().sort((a, b) => (b.profileId === state.active) - (a.profileId === state.active));
+    const presets = state.presets || [2, 3, 4, 5, 6];
+    const key = list.map(w => `${w.deviceId}:${w.paused}`).join('|') + '#' + presets.join(',');
+    if (key !== liveKey) {
+      liveKey = key;
+      box.innerHTML = list.map(w => `
+        <div class="livecard" data-dev="${esc(w.deviceId)}">
+          <div class="lt"><span><span class="dot"></span>LIVE: ${esc(w.name)}</span><small>on the ${esc(w.device)}</small></div>
+          <div class="nums">
+            <div><b data-f="time"></b><span>time</span></div>
+            <div><b data-f="dist"></b><span>km</span></div>
+            <div><b data-f="kcal"></b><span>kcal</span></div>
+            <div><b data-f="speed"></b><span>km/h</span></div>
+          </div>
+          <div class="row"><button class="stop" data-cmd="stop">■ STOP</button></div>
+          <div class="row">
+            ${w.paused ? `<button class="primary" data-cmd="resume">▶ Resume</button>` : `<button data-cmd="pause">❚❚ Pause</button>`}
+          </div>
+          <div class="row sp">${presets.map(v => `<button data-cmd="speed" data-v="${v}">${v.toFixed(1)}</button>`).join('')}</div>
+          <div class="msg" data-f="msg"></div>
+        </div>`).join('');
+    }
+    for (const w of list) {
+      const card = box.querySelector(`[data-dev="${CSS.escape(w.deviceId)}"]`);
+      if (!card) continue;
+      const set = (f, v) => { const el = card.querySelector(`[data-f="${f}"]`); if (el.textContent !== v) el.textContent = v; };
+      set('time', fmtTime(w.time));
+      set('dist', (w.dist / 1000).toFixed(2));
+      set('kcal', String(w.kcal));
+      set('speed', w.paused ? 'pause' : (+w.speed).toFixed(1));
+      set('msg', liveMsg[w.deviceId] || (w.hr ? `Heart rate ${w.hr} bpm` : ''));
+    }
+  }
+  $('livePanel').onclick = async e => {
+    const b = e.target.closest('button[data-cmd]'), card = e.target.closest('.livecard');
+    if (!b || !card) return;
+    const dev = card.dataset.dev, cmd = b.dataset.cmd;
+    liveMsg[dev] = 'Sending…'; renderLive();
+    try {
+      await api('/api/live/cmd', { deviceId: dev, cmd, value: parseFloat(b.dataset.v) || 0, from: deviceName });
+      liveMsg[dev] = cmd === 'stop' ? 'STOP sent. The belt stops in 1–2 seconds.'
+        : cmd === 'speed' ? `Speed ${b.dataset.v} km/h sent.` : cmd === 'pause' ? 'Pause sent.' : 'Resume sent.';
+    } catch (err) {
+      liveMsg[dev] = 'Could not send: ' + err.message + ' Use the treadmill\'s own stop button.';
+    }
+    renderLive();
+    setTimeout(() => { liveMsg[dev] = ''; renderLive(); }, 6000);
   };
 
   // ---------- keep the screen on ----------
