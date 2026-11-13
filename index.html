@@ -393,9 +393,13 @@
     if (device && device.gatt.connected && !connecting && live.at && now - live.at > 7000
         && live.lastSpeed > 0.3 && now - stallFixAt > 20000) {
       stallFixAt = now;
-      log(`no numbers for ${Math.round((now - live.at) / 1000)} s while moving: connecting again`);
-      setStatus('The treadmill stopped sending numbers. Connecting again… Your walk is safe.', 'warn');
-      try { device.gatt.disconnect(); } catch (e) {}
+      if (useFitshowData(`no numbers for ${Math.round((now - live.at) / 1000)} s while moving`)) {
+        live.at = now - 2000;                       // give the second channel a few seconds
+      } else {
+        log(`no numbers for ${Math.round((now - live.at) / 1000)} s while moving: connecting again`);
+        setStatus('The treadmill stopped sending numbers. Connecting again… Your walk is safe.', 'warn');
+        try { device.gatt.disconnect(); } catch (e) {}
+      }
     }
     if (fresh && live.speed > 0.3) {
       w.time += dt;
@@ -934,6 +938,7 @@ ${tp}
     };
   }
 
+  const isIOS = /iPhone|iPad|iPod/.test(navigator.userAgent);
   const uuid = n => `0000${n.toString(16).padStart(4, '0')}-0000-1000-8000-00805f9b34fb`;
   // Bluefy can throw things that are not Error objects; get some text out of anything.
   function errText(e) {
@@ -971,7 +976,7 @@ ${tp}
         how === 'all' ? { acceptAllDevices: true, optionalServices }
         : how === 'name' ? { filters: [{ namePrefix: 'FS-' }], optionalServices }
         : how === 'fitshow' ? { filters: [{ services: [uuid(FITSHOW)] }] }
-        : { filters: [{ services: [uuid(FTMS)] }] });
+        : { filters: [{ services: [uuid(FTMS)] }], ...(isIOS ? {} : { optionalServices: [uuid(FITSHOW)] }) });
     } catch (e) {
       const msg = errText(e);
       log('pick failed: ' + msg);
@@ -1044,6 +1049,19 @@ ${tp}
     }
   }
 
+  // FTMS can go silent (connected, but no numbers). Then read the numbers
+  // on FitShow's own channel: ask for the status every second.
+  function useFitshowData(reason) {
+    if (!writeChar || mode === 'FitShow') return false;
+    mode = 'FitShow';
+    clearInterval(pollTimer);
+    const ask = fitshowFrame([0x51]);
+    pollTimer = setInterval(() => bleWrite(writeChar, ask, true).catch(() => {}), 1000);
+    log(`${reason}: reading numbers on the FitShow channel`);
+    setStatus('Reading the numbers on the second channel…', 'warn');
+    return true;
+  }
+
   async function openGatt() {
     if (connecting || !device) return;
     connecting = true; clearTimeout(retryTimer); clearTimeout(dataTimer);
@@ -1061,8 +1079,9 @@ ${tp}
       log(`connected, mode ${mode}, name "${device.name || ''}", FTMS control ${ctrlChar ? 'yes' : 'no'}, FitShow control ${writeChar ? 'yes' : 'no'}`);
       keepAwake();
       // "Connected" but no numbers: the link is half open. Connect once more.
-      dataTimer = setTimeout(() => {
+      const checkData = () => {
         if (gotData || !device || !device.gatt.connected) return;
+        if (useFitshowData('no FTMS data after 10 s')) { dataTimer = setTimeout(checkData, 8000); return; }
         if (!noDataRetried) {
           noDataRetried = true;
           log('no data after 10 s, connecting again');
@@ -1071,7 +1090,8 @@ ${tp}
         } else {
           setStatus('Connected, but no numbers yet. This is OK if the belt is stopped. Push Start.', 'warn');
         }
-      }, 10000);
+      };
+      dataTimer = setTimeout(checkData, 10000);
     } catch (e) {
       log('connect failed: ' + errText(e));
       try { device.gatt.disconnect(); } catch (x) {}
