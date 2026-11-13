@@ -177,7 +177,7 @@
     <button class="danger" id="btnFinish">Finish walk &amp; save</button>
   </div>
   <div class="row">
-    <button class="small" id="btnFixDist" style="flex:1">Correct the distance</button>
+    <button class="small" id="btnFixDist" style="flex:1">Correct distance &amp; time</button>
   </div>
   <div class="note">Pause, stop and start the treadmill as much as you like. The time and distance keep adding up until you push "Finish walk".</div>
   <label class="toggle"><span>Speak every kilometre</span><input type="checkbox" id="voice"></label>
@@ -716,10 +716,31 @@
     const km = parseFloat(t.replace(',', '.'));
     if (!(km >= 0 && km < 200)) { alert('Type a number, for example 1.5'); return; }
     const want = km * 1000, ratio = total(c.dist) > 0 ? want / total(c.dist) : 1;
-    c.dist.bank = want - c.dist.seg; c.dist.held = 0;
-    if (total(c.steps) > 0) { c.steps.bank = Math.round(total(c.steps) * ratio) - c.steps.seg; c.steps.held = 0; }
+    // Keep "held": if the treadmill is paused at 0 now and later goes on from
+    // its old number, that must still not count twice.
+    c.dist.bank = want - c.dist.seg;
+    if (total(c.steps) > 0) c.steps.bank = Math.round(total(c.steps) * ratio) - c.steps.seg;
     state.walk.spokenKm = Math.floor(km);
     log(`distance set by hand: ${now.toFixed(2)} -> ${km.toFixed(2)} km`);
+
+    // Then the walking time, so time, distance and speed fit together.
+    const w = state.walk, oldT = w.time;
+    const avg = oldT > 120 && now > 0.1 ? now / (oldT / 3600) : 5;        // km/h before the change
+    const guess = km > 0 ? km / Math.min(Math.max(avg, 2), 8) * 3600 : oldT;
+    const tt = prompt(`Walking time now: ${fmtTime(oldT)}.\nType the correct walking time (minutes, or h:mm:ss).\n` +
+                      `For ${km.toFixed(2)} km at ${Math.min(Math.max(avg, 2), 8).toFixed(1)} km/h that is about ${fmtTime(guess)}.`, fmtTime(guess));
+    if (tt != null && tt.trim()) {
+      const parts = tt.trim().replace(',', '.').split(':').map(Number);
+      const secs = parts.length === 1 ? parts[0] * 60
+        : parts.length === 2 ? parts[0] * 60 + parts[1] : parts[0] * 3600 + parts[1] * 60 + parts[2];
+      if (!(secs >= 0 && secs < 24 * 3600) || parts.some(x => !isFinite(x))) { alert('Type minutes like 45, or a time like 1:05:30.'); }
+      else {
+        // Calories follow the time: same rate per minute as before, or worked out from the speed.
+        w.kcal = oldT > 60 ? w.kcal * secs / oldT : kcalPerMin(km > 0 && secs > 0 ? km / (secs / 3600) : 5) * secs / 60;
+        w.time = secs;
+        log(`time set by hand: ${fmtTime(oldT)} -> ${fmtTime(secs)}, calories now ${Math.round(w.kcal)}`);
+      }
+    }
     save(); render();
   };
   function finishWalk(p) {
