@@ -338,15 +338,27 @@
 
   // ---------- live data ----------
   let live = { speed: 0, incline: 0, at: 0, hasDist: false, hasSteps: false, hr: 0, hrAt: 0 };
-  let lastTick = Date.now();
+  let lastTick = Date.now(), stallFixAt = 0;
 
   function onReading(r) {
-    const w = state.walk;
-    if (r.speed != null) live.speed = r.speed;
+    const w = state.walk, now = Date.now();
+    const before = total(w.counters.dist), gap = w.lastDataAt ? now - w.lastDataAt : 0;
+    if (r.speed != null) { live.speed = r.speed; live.lastSpeed = r.speed; }
     if (r.incline != null) live.incline = r.incline;
-    live.at = Date.now();
+    live.at = now; w.lastDataAt = now;
     if (r.dist != null) { live.hasDist = true; feedCounter(w.counters.dist, r.dist); }
     if (r.steps != null) { live.hasSteps = true; feedCounter(w.counters.steps, r.steps); }
+    // Numbers came back after a gap (frozen link, reload, reconnect), and the
+    // treadmill counted metres in the meantime: add the time and calories for
+    // those metres too, at the speed you walked.
+    const jump = total(w.counters.dist) - before;
+    if (gap > 5000 && jump > 30 && jump < 30000) {
+      const v = live.speed > 0.3 ? live.speed : (w.time > 60 ? before / w.time * 3.6 : 5);
+      const add = Math.min(jump / (v / 3.6), gap / 1000);
+      w.time += add;
+      w.kcal += kcalPerMin(v) * add / 60;
+      log(`catch-up after ${Math.round(gap / 1000)} s gap: +${Math.round(jump)} m, +${Math.round(add)} s at ${v.toFixed(1)} km/h`);
+    }
     if (!w.startedAt && live.speed > 0.3) w.startedAt = Date.now();
     save(); render();
   }
@@ -355,8 +367,8 @@
 
   // Calories per minute for the active person.
   // With heart rate: Keytel et al. (2005). Without: ACSM walking / running equations.
-  function kcalPerMin() {
-    const p = profile(), v = live.speed;
+  function kcalPerMin(v = live.speed) {
+    const p = profile();
     if (v <= 0.3) return 0;
     if (hrFresh()) {
       const k = p.sex === 'f'
@@ -376,6 +388,15 @@
     lastTick = now;
     const fresh = now - live.at < 5000;
     if (!fresh) live.speed = 0;
+    // The link can freeze: still "connected", but no numbers while the belt was moving.
+    // Then connect again; the distance catches up from the treadmill's own counter.
+    if (device && device.gatt.connected && !connecting && live.at && now - live.at > 7000
+        && live.lastSpeed > 0.3 && now - stallFixAt > 20000) {
+      stallFixAt = now;
+      log(`no numbers for ${Math.round((now - live.at) / 1000)} s while moving: connecting again`);
+      setStatus('The treadmill stopped sending numbers. Connecting again… Your walk is safe.', 'warn');
+      try { device.gatt.disconnect(); } catch (e) {}
+    }
     if (fresh && live.speed > 0.3) {
       w.time += dt;
       w.kcal += kcalPerMin() * dt / 60;
